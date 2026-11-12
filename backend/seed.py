@@ -1,4 +1,8 @@
+"""Create the database schema and load the Dutch lexicon.
 
+Safe to run repeatedly: tables are created only if missing and lexicon
+entries are updated in place. Works for SQLite and Postgres (DATABASE_URL).
+"""
 from __future__ import annotations
 
 import os
@@ -6,165 +10,45 @@ import sys
 
 sys.path.insert(0, os.path.dirname(__file__))
 
-from app.database import Base, SessionLocal, engine
-from app.models import (
-    AssessmentBatch,
-    ConditionType,
-    InteractionTelemetry,
-    Lexicon,
-    OnboardingWords,
-    ReadingSession,
-    RecommendedVocabulary,
-    SurveyResult,
-    User,
-    UserTopic,
-    UserVocabularyVector,
-    VocabularyTestResult,
-)
-from app.routers.auth import hash_password, study_email
-from main import _ensure_database_columns
-
-
-print("Creating tables...")
-Base.metadata.create_all(bind=engine)
-_ensure_database_columns()
-print("  tables ready")
-
-db = SessionLocal()
-
+from app.database import SessionLocal, create_schema
+from app.models import Lexicon
 from lexicon_data import LEXICON_DATA
 
-print("Seeding lexicon...")
-for entry in LEXICON_DATA:
-    exists = db.query(Lexicon).filter(Lexicon.word == entry["word"]).first()
-    if exists:
-        exists.translation = entry["translation"]
-        exists.cefr_level = entry["cefr_level"]
-        exists.examples = entry.get("examples")
-        exists.use_cases = entry.get("use_cases")
-    else:
-        db.add(Lexicon(**entry))
-db.commit()
-print(f"  {len(LEXICON_DATA)} words processed")
 
-seed_team_accounts = os.getenv("SEED_TEST_ACCOUNTS", "false").lower() in {
-    "1",
-    "true",
-    "yes",
-}
-reset_team_accounts = os.getenv("RESET_TEAM_ACCOUNT_DATA", "false").lower() in {
-    "1",
-    "true",
-    "yes",
-}
+def main() -> None:
+    print("Creating tables...")
+    create_schema()
+    print("  tables ready")
+
+    db = SessionLocal()
+    try:
+        print("Seeding lexicon...")
+        existing = {row.word: row for row in db.query(Lexicon).all()}
+        added = 0
+        for entry in LEXICON_DATA:
+            word = entry["word"].strip().lower()
+            row = existing.get(word)
+            if row:
+                row.translation = entry["translation"]
+                row.cefr_level = entry["cefr_level"]
+                row.examples = entry.get("examples")
+                row.use_cases = entry.get("use_cases")
+            else:
+                db.add(Lexicon(
+                    word=word,
+                    translation=entry["translation"],
+                    cefr_level=entry["cefr_level"],
+                    examples=entry.get("examples"),
+                    use_cases=entry.get("use_cases"),
+                ))
+                added += 1
+        db.commit()
+        print(f"  {len(LEXICON_DATA)} words processed ({added} new)")
+    finally:
+        db.close()
+
+    print("\nSeed complete. Sign up in the app to create your account.")
 
 
-def reset_team_user(db, user: User, condition: ConditionType, display_name: str):
-    session_ids = [
-        row.session_id
-        for row in db.query(ReadingSession.session_id)
-        .filter(ReadingSession.user_id == user.user_id)
-        .all()
-    ]
-
-    if session_ids:
-        db.query(SurveyResult).filter(SurveyResult.session_id.in_(session_ids)).delete(synchronize_session=False)
-        db.query(InteractionTelemetry).filter(InteractionTelemetry.session_id.in_(session_ids)).delete(synchronize_session=False)
-        db.query(ReadingSession).filter(ReadingSession.user_id == user.user_id).delete(synchronize_session=False)
-
-    db.query(VocabularyTestResult).filter(VocabularyTestResult.user_id == user.user_id).delete(synchronize_session=False)
-    db.query(OnboardingWords).filter(OnboardingWords.user_id == user.user_id).delete(synchronize_session=False)
-    db.query(RecommendedVocabulary).filter(RecommendedVocabulary.user_id == user.user_id).delete(synchronize_session=False)
-    db.query(UserVocabularyVector).filter(UserVocabularyVector.user_id == user.user_id).delete(synchronize_session=False)
-    db.query(AssessmentBatch).filter(AssessmentBatch.user_id == user.user_id).delete(synchronize_session=False)
-    db.query(UserTopic).filter(UserTopic.user_id == user.user_id).delete(synchronize_session=False)
-
-    user.display_name = display_name
-    user.estimated_cefr = "B1"
-    user.onboarding_completed = False
-    user.current_condition = condition
-    user.has_switched_conditions = False
-    user.age = None
-    user.city = None
-    user.gender = None
-    user.job = None
-    user.academic_background = None
-    user.mother_language = None
-    user.other_languages = None
-    user.purpose = None
-
-if seed_team_accounts:
-    team_accounts = [
-        ("KIM", "Kim", ConditionType.ADAPTIVE),
-        ("KIKI", "Kiki", ConditionType.BASELINE),
-        ("JULIAN", "Julian", ConditionType.ADAPTIVE),
-        ("TJ", "TJ", ConditionType.BASELINE),
-        ("EVIE", "Evie", ConditionType.ADAPTIVE),
-        ("JY", "Jy", ConditionType.BASELINE),
-        ("TEST1", "Test User 1", ConditionType.ADAPTIVE),
-        ("TEST2", "Test User 2", ConditionType.BASELINE),
-        ("TEST3", "Test User 3", ConditionType.ADAPTIVE),
-        ("TEST4", "Test User 4", ConditionType.BASELINE),
-        ("TEST5", "Test User 5", ConditionType.ADAPTIVE),
-        ("TEST6", "Test User 6", ConditionType.BASELINE), 
-        ("TEST7", "Test User 7", ConditionType.ADAPTIVE),
-        ("TEST8", "Test User 8", ConditionType.BASELINE),     
-        ("TEST9", "Test User 9", ConditionType.ADAPTIVE),
-        ("TEST10", "Test User 10", ConditionType.BASELINE), 
-        ("TEST11", "Test User 11", ConditionType.ADAPTIVE),
-        ("TEST12", "Test User 12", ConditionType.BASELINE),
-        ("TEST13", "Test User 13", ConditionType.ADAPTIVE),
-        ("TEST14", "Test User 14", ConditionType.BASELINE),
-        ("TEST15", "Test User 15", ConditionType.ADAPTIVE),
-        ("TEST16", "Test User 16", ConditionType.BASELINE),
-        ("TEST17", "Test User 17", ConditionType.ADAPTIVE),
-        ("TEST18", "Test User 18", ConditionType.BASELINE),
-        ("TEST19", "Test User 19", ConditionType.ADAPTIVE),
-        ("TEST20", "Test User 20", ConditionType.BASELINE)   
-    ]   
-    password = os.getenv("SEED_TEST_PASSWORD")
-    if not password:
-        raise RuntimeError("Set SEED_TEST_PASSWORD before seeding team test accounts.")
-
-    print("Seeding team test accounts...")
-    db.query(User).filter(User.email.like("test%@leeswijs.local")).delete(synchronize_session=False)
-
-    for study_id, display_name, condition in team_accounts:
-        user = db.query(User).filter(User.study_code == study_id).first()
-        if not user:
-            user = User(
-                user_id=f"team_{study_id.lower()}",
-                email=study_email(study_id),
-                username=study_id,
-                password_hash=hash_password(password),
-                display_name=display_name,
-                study_code=study_id,
-                estimated_cefr="B1",
-                onboarding_completed=False,
-                current_condition=condition,
-                has_switched_conditions=False,
-            )
-            db.add(user)
-            db.flush()
-        else:
-            user.email = study_email(study_id)
-            user.username = study_id
-            user.password_hash = hash_password(password)
-            user.display_name = display_name
-            user.study_code = study_id
-            user.estimated_cefr = user.estimated_cefr or "B1"
-            if reset_team_accounts:
-                reset_team_user(db, user, condition, display_name)
-    db.commit()
-    print(f"  {len(team_accounts)} team accounts processed")
-    if reset_team_accounts:
-        print("  team account study data reset")
-else:
-    print("Skipping team test accounts. Set SEED_TEST_ACCOUNTS=true for local demos.")
-
-print("Participant study accounts are managed separately by KIKI.")
-
-db.close()
-
-print("\nSeed complete.")
-print("  Use Study ID + password to log in.")
+if __name__ == "__main__":
+    main()
