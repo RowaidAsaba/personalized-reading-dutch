@@ -1,37 +1,39 @@
-import json
 import logging
-import re
 
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
-from google import genai
-
-from app.config import GEMINI_MODEL, GOOGLE_API_KEY
+from app import gemini
 from app.database import get_db
-from app.models import Lexicon
+from app.models import Lexicon, User
 from app.schemas import LexiconEntry
+from app.security import get_current_user
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/lexicon", tags=["Lexicon"])
 
-_client = genai.Client(api_key=GOOGLE_API_KEY)
-
 
 @router.get("/word/{word_id}", response_model=LexiconEntry)
-def get_word_by_id(word_id: int, db: Session = Depends(get_db)):
+def get_word_by_id(word_id: int, _: User = Depends(get_current_user), db: Session = Depends(get_db)):
     entry = db.query(Lexicon).filter(Lexicon.word_id == word_id).first()
     if not entry:
-        raise HTTPException(status_code=404, detail=f"word_id={word_id} not in lexicon")
+        raise HTTPException(status_code=404, detail="Word not found")
     return LexiconEntry.model_validate(entry)
 
 
 @router.get("/define/{word}", response_model=LexiconEntry)
-def define_word(word: str, db: Session = Depends(get_db)):
-    clean_word = word.lower().strip()
+def define_word(word: str, _: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    """Dictionary lookup; unknown words are defined by Gemini once and cached in the lexicon."""
+    clean_word = word.strip().lower()
+    if not clean_word or len(clean_word) > 64:
+        raise HTTPException(status_code=422, detail="Invalid word")
+
     existing = db.query(Lexicon).filter(Lexicon.word == clean_word).first()
     if existing:
         return LexiconEntry.model_validate(existing)
+
+    if not gemini.is_configured():
+        raise HTTPException(status_code=503, detail="Dictionary lookups need the text generator to be configured.")
 
     prompt = f"""\
 Provide a concise lexicon entry for the Dutch word "{clean_word}".
@@ -45,41 +47,33 @@ Return ONLY a valid JSON object with this exact structure:
     {{"nl": "Another Dutch example", "en": "Its English translation"}}
   ],
   "use_cases": [
-    {{"nl": "Context sentence showing typical use", "en": "English translation"}},
-    {{"nl": "Another use case", "en": "English translation"}}
+    {{"nl": "Context sentence showing typical use", "en": "English translation"}}
   ]
 }}
 """
     try:
-        response = _client.models.generate_content(
-            model=GEMINI_MODEL,
-            contents=prompt,
-        )
-        text = response.text.strip()
-        text = re.sub(r"^```(?:json)?\s*", "", text)
-        text = re.sub(r"\s*```$", "", text)
-        data = json.loads(text)
-    except Exception as e:
-        logger.error("[Lexicon/define] Gemini failed for %r: %s", clean_word, e)
-        raise HTTPException(status_code=502, detail=f"Could not generate definition: {e}")
+        data = gemini.generate_json(prompt, attempts=2, label="Lexicon")
+    except Exception as exc:
+        logger.warning("[Lexicon/define] failed for %r: %s", clean_word, exc)
+        raise HTTPException(status_code=502, detail="Could not look up this word right now.")
+    if not isinstance(data, dict):
+        raise HTTPException(status_code=502, detail="Could not look up this word right now.")
 
-    new_entry = Lexicon(
-        word=data.get("word", clean_word),
-        translation=data.get("translation", "—"),
-        cefr_level=data.get("cefr_level", "B1"),
-        examples=data.get("examples", []),
-        use_cases=data.get("use_cases", []),
+    entry = Lexicon(
+        word=clean_word,
+        translation=str(data.get("translation") or "—")[:255],
+        cefr_level=str(data.get("cefr_level") or "B1")[:10],
+        examples=data.get("examples") or [],
+        use_cases=data.get("use_cases") or [],
     )
-    db.add(new_entry)
+    db.add(entry)
     try:
         db.commit()
-        db.refresh(new_entry)
+        db.refresh(entry)
     except Exception:
         db.rollback()
         existing = db.query(Lexicon).filter(Lexicon.word == clean_word).first()
         if existing:
             return LexiconEntry.model_validate(existing)
         raise
-
-    logger.info("[Lexicon/define] New word added: %r (%s)", clean_word, new_entry.cefr_level)
-    return LexiconEntry.model_validate(new_entry)
+    return LexiconEntry.model_validate(entry)

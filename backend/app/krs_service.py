@@ -1,27 +1,40 @@
+"""Knowledge Recommendation Service: keeps a reservoir of new words per user.
+
+The reservoir (recommended_vocabulary) feeds both the Discover flashcards and the
+"blue" target words in generated texts. Words are chosen by Gemini from the
+user's profile and interests, matched against the lexicon, and topped up from
+the lexicon at the user's level when Gemini is unavailable or returns too few
+usable words.
+"""
 from __future__ import annotations
 
-import json
 import logging
-import random as _random
-import re
+import random
 
-from google import genai
 from sqlalchemy.orm import Session
 
-from app.config import GOOGLE_API_KEY, GEMINI_MODEL
+from app import gemini
 from app.models import (
-    Lexicon, RecommendedVocabulary, TopicStatus, User, UserTopic,
-    UserVocabularyVector, VocabStatus
+    CEFR_LEVELS,
+    Lexicon,
+    RecommendedVocabulary,
+    TopicStatus,
+    User,
+    UserTopic,
+    UserVocabularyVector,
+    VocabStatus,
 )
 
 logger = logging.getLogger(__name__)
 
-_client = genai.Client(api_key=GOOGLE_API_KEY)
+RESERVOIR_TARGET = 50   # fill up to this many unseen recommendations
+RESERVOIR_FLOOR = 25    # refill when fewer than this remain
+SOURCE_GEMINI = "gemini"
+SOURCE_FALLBACK = "lexicon_fallback"
 
-reservoir_target = 50
-gatekeeper_floor = 25
+DECIDED_STATUSES = (VocabStatus.LEARNING, VocabStatus.MASTERED)
 
-function_words = {
+FUNCTION_WORDS = {
     "de", "het", "een", "en", "maar", "of", "want", "dus", "omdat",
     "ik", "jij", "je", "hij", "zij", "ze", "wij", "we", "u", "jullie",
     "mij", "me", "jou", "hem", "haar", "ons", "hun", "hen",
@@ -34,278 +47,239 @@ function_words = {
 }
 
 
-def _is_target_candidate(lex: Lexicon) -> bool:
+def is_target_candidate(lex: Lexicon) -> bool:
     word = (lex.word or "").strip().lower()
-    if not word or word in function_words:
+    if not word or word in FUNCTION_WORDS:
         return False
-    if word.startswith("'") or any(char.isdigit() for char in word):
+    if word.startswith("'") or any(ch.isdigit() for ch in word):
         return False
-    if len(word) < 3 or len(word) > 36:
-        return False
-    return True
+    return 3 <= len(word) <= 36
 
-def run_krs(user_id: str, db: Session, is_refill: bool = False) -> dict:
+
+# ---------------------------------------------------------------- user signals
+
+def acquisition_score(user_id: str, db: Session) -> int:
+    """Share of decided words the user knows: MASTERED / (MASTERED + LEARNING), in percent."""
+    rows = (
+        db.query(UserVocabularyVector.status)
+        .filter(UserVocabularyVector.user_id == user_id, UserVocabularyVector.status.in_(DECIDED_STATUSES))
+        .all()
+    )
+    if not rows:
+        return 0
+    mastered = sum(1 for (status,) in rows if status == VocabStatus.MASTERED)
+    return int(round(mastered / len(rows) * 100))
+
+
+def interested_topics(user_id: str, db: Session) -> list[str]:
+    return [
+        row.topic_name
+        for row in db.query(UserTopic)
+        .filter(UserTopic.user_id == user_id, UserTopic.status == TopicStatus.INTERESTED)
+        .order_by(UserTopic.score.desc(), UserTopic.id)
+        .all()
+    ]
+
+
+def decided_word_ids(user_id: str, db: Session) -> set[int]:
+    return {
+        word_id
+        for (word_id,) in db.query(UserVocabularyVector.word_id)
+        .filter(UserVocabularyVector.user_id == user_id, UserVocabularyVector.status.in_(DECIDED_STATUSES))
+        .all()
+    }
+
+
+def reservoir_rows(user_id: str, db: Session) -> list[RecommendedVocabulary]:
+    """Recommendations the user has not yet decided on (not LEARNING / MASTERED)."""
+    decided = decided_word_ids(user_id, db)
+    rows = (
+        db.query(RecommendedVocabulary)
+        .filter(RecommendedVocabulary.user_id == user_id)
+        .join(RecommendedVocabulary.lexicon_entry)
+        .all()
+    )
+    return [row for row in rows if row.word_id not in decided]
+
+
+# ---------------------------------------------------------------- refill
+
+def ensure_reservoir(user_id: str, db: Session, minimum: int = RESERVOIR_FLOOR, force: bool = False) -> dict:
+    """Refill the reservoir when it drops below `minimum` (or always when `force`).
+
+    Returns a small report dict for logging.
+    """
     user = db.query(User).filter(User.user_id == user_id).first()
     if not user:
         raise ValueError(f"User '{user_id}' not found.")
 
-    vector_ids = {
-        v.word_id for v in db.query(UserVocabularyVector)
-        .filter(UserVocabularyVector.user_id == user_id).all()
-    }
-    current_recs = (
-        db.query(RecommendedVocabulary)
-        .filter(
-            RecommendedVocabulary.user_id == user_id,
-            RecommendedVocabulary.remark == "adaptive"
-        )
-        .all()
-    )
-    usable_count = sum(1 for r in current_recs if r.word_id not in vector_ids)
+    usable = reservoir_rows(user_id, db)
+    if len(usable) >= minimum and not force:
+        return {"skipped": True, "usable": len(usable), "gemini": 0, "fallback": 0}
 
-    if usable_count >= gatekeeper_floor:
-        logger.info(
-            f"[KRS] user={user_id} | reservoir={usable_count} >= {gatekeeper_floor} "
-            f"| skipping Gemini call"
-        )
-        return {"user_id": user_id, "words_recommended": 0, "new_entries_saved": 0, "skipped": True}
+    needed = max(10, RESERVOIR_TARGET - len(usable))
+    gemini_saved = 0
+    if gemini.is_configured():
+        words = _call_gemini(user, db, needed)
+        gemini_saved = _save_words(user_id, words, SOURCE_GEMINI, db)
+        if gemini_saved:
+            _replace_fallback_rows(user_id, gemini_saved, db)
 
-    interests = _get_interests(user_id, db)
-    excluded_words = _get_excluded_words(user_id, db)
-
-    needed = max(1, reservoir_target - usable_count)
-    raw_words = _call_gemini_krs(user, interests, excluded_words, needed, is_refill)
-    matched, new_count = _save_matches(user_id, raw_words, db)
+    usable_after = len(reservoir_rows(user_id, db))
+    fallback_saved = 0
+    if usable_after < minimum:
+        fallback_saved = _top_up_from_lexicon(user, RESERVOIR_TARGET - usable_after, db)
 
     logger.info(
-        f"[KRS] user={user_id} | was={usable_count} | needed={needed} "
-        f"| gemini={len(raw_words)} | matched={matched} | saved={new_count}"
+        "[KRS] user=%s usable=%d needed=%d gemini=%d fallback=%d",
+        user_id, len(usable), needed, gemini_saved, fallback_saved,
     )
-    return {
-        "user_id": user_id,
-        "words_recommended": len(raw_words),
-        "words_matched": matched,
-        "new_entries_saved": new_count,
-        "skipped": False,
-    }
+    return {"skipped": False, "usable": len(usable), "gemini": gemini_saved, "fallback": fallback_saved}
 
 
-def reservoir_count(user_id: str, db: Session) -> int:
-    vector_ids = {
-        v.word_id for v in db.query(UserVocabularyVector)
-        .filter(UserVocabularyVector.user_id == user_id).all()
-    }
-    recs = (
-        db.query(RecommendedVocabulary)
-        .filter(
-            RecommendedVocabulary.user_id == user_id,
-            RecommendedVocabulary.remark == "adaptive"
+def _call_gemini(user: User, db: Session, count: int) -> list[str]:
+    interests = interested_topics(user.user_id, db)
+    excluded = _excluded_words(user.user_id, db)
+    score = acquisition_score(user.user_id, db)
+    level = user.estimated_cefr or "B1"
+
+    language_line = ""
+    if user.mother_language:
+        others = f" and also speaks {user.other_languages}" if user.other_languages else ""
+        language_line = (
+            f"- Languages: the learner's mother tongue is {user.mother_language}{others}. "
+            f"Prefer words whose meaning is NOT transparent from those languages "
+            f"(avoid obvious cognates and international words).\n"
         )
-        .all()
+
+    prompt = (
+        "You help choose Dutch vocabulary for an adult language learner.\n\n"
+        "LEARNER PROFILE:\n"
+        f"- Age: {user.age or 'unknown'}\n"
+        f"- Location: {user.city or 'unknown'}\n"
+        f"- Job: {user.job or 'unknown'}\n"
+        f"- Academic background: {user.academic_background or 'unknown'}\n"
+        f"- Purpose of learning Dutch: {user.purpose or 'general'}\n"
+        f"- Estimated CEFR level: {level}\n"
+        f"- Share of studied words already known: {score}%\n"
+        f"- Interests: {', '.join(interests) if interests else 'general life'}\n"
+        f"{language_line}\n"
+        f"EXCLUSION LIST (never recommend these): {', '.join(sorted(excluded)) if excluded else 'none'}\n\n"
+        "TASK:\n"
+        f"Recommend exactly {count} common Dutch words (single words, lower-case, dictionary form) that are "
+        f"useful for this learner's interests, job and daily life at CEFR level {level}. "
+        f"{'Prefer challenging boundary words at the top of the level.' if score > 70 else 'Prefer core, high-frequency words of the level.'}\n"
+        "Return ONLY a JSON array of strings.\n"
     )
-    return sum(1 for r in recs if r.word_id not in vector_ids)
+    try:
+        words = gemini.generate_json(prompt, attempts=2, label="KRS", max_output_tokens=1500)
+    except Exception as exc:
+        logger.warning("[KRS] Gemini call failed: %s", exc)
+        return []
+    if not isinstance(words, list):
+        return []
+    return [w.strip().lower() for w in words if isinstance(w, str) and w.strip()]
 
 
-def _get_excluded_words(user_id: str, db: Session) -> list[str]:
-    rows = (
+def _excluded_words(user_id: str, db: Session) -> set[str]:
+    known = (
         db.query(Lexicon.word)
         .join(UserVocabularyVector, UserVocabularyVector.word_id == Lexicon.word_id)
-        .filter(
-            UserVocabularyVector.user_id == user_id,
-            UserVocabularyVector.status.in_([VocabStatus.MASTERED, VocabStatus.LEARNING])
-        )
+        .filter(UserVocabularyVector.user_id == user_id, UserVocabularyVector.status.in_(DECIDED_STATUSES))
         .all()
     )
-    rec_rows = (
+    recommended = (
         db.query(Lexicon.word)
         .join(RecommendedVocabulary, RecommendedVocabulary.word_id == Lexicon.word_id)
         .filter(RecommendedVocabulary.user_id == user_id)
         .all()
     )
-    return list({row.word for row in rows} | {row.word for row in rec_rows})
+    return {w for (w,) in known} | {w for (w,) in recommended}
 
 
-def _get_interests(user_id: str, db: Session) -> list[str]:
-    rows = (
-        db.query(UserTopic)
-        .filter(UserTopic.user_id == user_id, UserTopic.status == TopicStatus.INTERESTED)
-        .all()
-    )
-    return [r.topic_name for r in rows]
+def _save_words(user_id: str, words: list[str], source: str, db: Session) -> int:
+    if not words:
+        return 0
+    lexicon_rows = {row.word: row for row in db.query(Lexicon).filter(Lexicon.word.in_(set(words))).all()}
+    existing_recs = {
+        word_id for (word_id,) in db.query(RecommendedVocabulary.word_id)
+        .filter(RecommendedVocabulary.user_id == user_id).all()
+    }
+    decided = decided_word_ids(user_id, db)
 
-
-def _call_gemini_krs(
-    user: User,
-    interests: list[str],
-    excluded_words: list[str],
-    count: int,
-    is_refill: bool = False,
-) -> list[str]:
-    interests_str = ", ".join(interests) if interests else "general life"
-    excluded_str = ", ".join(excluded_words) if excluded_words else "none"
-
-    prompt = (
-        f"You help choose Dutch vocabulary for language learners.\n\n"
-        f"USER PROFILE:\n"
-        f"- Age: {user.age}\n"
-        f"- Location: {user.city}\n"
-        f"- Job: {user.job}\n"
-        f"- Academic Background: {user.academic_background}\n"
-        f"- Purpose of learning Dutch: {user.purpose}\n"
-        f"- Estimated CEFR Level: {user.estimated_cefr}\n"
-        f"- Vocabulary Acquisition Score: {user.acquisition_score}%\n"
-        f"- Interests: {interests_str}\n\n"
-        f"EXCLUSION LIST - Do NOT recommend any of these words: {excluded_str}\n\n"
-        f"TASK:\n"
-        f"Recommend exactly {count} Dutch words that are highly relevant to this user's "
-        f"job, age, and interests. "
-        f"{'Focus on challenging boundary words' if user.acquisition_score > 70 else 'Focus on core foundational words'} "
-        f"within the {user.estimated_cefr} CEFR level.\n"
-    )
-
-    if is_refill:
-        prompt += (
-            "\nThis is a refill request. The user has already seen and processed "
-            "many words. Increase the complexity and rarity slightly to keep them challenged.\n"
-        )
-
-    prompt += (
-        f"\nReturn ONLY a valid JSON array of exactly {count} lowercase Dutch words.\n"
-        f'Example: ["onderhandelen", "vrijwilliger", ...]'
-    )
-
-    try:
-        response = _client.models.generate_content(
-            model=GEMINI_MODEL,
-            contents=prompt,
-        )
-        text = response.text.strip()
-        text = re.sub(r"^```(?:json)?\s*", "", text)
-        text = re.sub(r"\s*```$", "", text)
-        words = json.loads(text)
-        if isinstance(words, list):
-            return [w.lower().strip() for w in words if isinstance(w, str)]
-    except Exception as e:
-        logger.error("[KRS] Gemini call failed: %s", e)
-
-    return []
-
-
-def _save_matches(user_id: str, words: list[str], db: Session) -> tuple[int, int]:
-    matched = 0
-    new_count = 0
-
+    saved = 0
     for word in words:
-        lex = db.query(Lexicon).filter(Lexicon.word == word).first()
-        if not lex:
+        lex = lexicon_rows.get(word)
+        if not lex or lex.word_id in existing_recs or lex.word_id in decided or not is_target_candidate(lex):
             continue
-        matched += 1
-
-        exists_in_rec = db.query(RecommendedVocabulary).filter(
-            RecommendedVocabulary.user_id == user_id,
-            RecommendedVocabulary.word_id == lex.word_id,
-        ).first()
-
-        exists_in_vector = db.query(UserVocabularyVector).filter(
-            UserVocabularyVector.user_id == user_id,
-            UserVocabularyVector.word_id == lex.word_id,
-        ).first()
-
-        if not exists_in_rec and not exists_in_vector:
-            db.add(RecommendedVocabulary(user_id=user_id, word_id=lex.word_id, remark="adaptive"))
-            new_count += 1
-
+        db.add(RecommendedVocabulary(user_id=user_id, word_id=lex.word_id, source=source))
+        existing_recs.add(lex.word_id)
+        saved += 1
     db.commit()
-    return matched, new_count
+    return saved
 
 
-def run_baseline_krs(user_id: str, db: Session, target_count: int = 10, study_phase: int = 1) -> list[int]:
-    from app.models import OnboardingWords
-
-    user = db.query(User).filter(User.user_id == user_id).first()
-    if not user:
-        raise ValueError(f"User '{user_id}' not found.")
-
-    cefr = user.estimated_cefr or "B1"
-    remark_val = "baseline"
-
-    known_ids: set[int] = {
-        v.word_id for v in
-        db.query(UserVocabularyVector)
-        .filter(UserVocabularyVector.user_id == user_id)
-        .all()
+def _replace_fallback_rows(user_id: str, count: int, db: Session) -> None:
+    """Fallback rows are the least personalised; drop up to `count` untouched ones once Gemini delivered."""
+    touched = {
+        word_id for (word_id,) in db.query(UserVocabularyVector.word_id)
+        .filter(UserVocabularyVector.user_id == user_id).all()
     }
-
-    used_ids: set[int] = {
-        ow.word_id for ow in
-        db.query(OnboardingWords)
-        .filter(OnboardingWords.user_id == user_id)
-        .all()
-    }
-
-    # Also exclude words already recommended for this phase
-    already_rec_ids: set[int] = {
-        r.word_id for r in
+    rows = (
         db.query(RecommendedVocabulary)
-        .filter(
-            RecommendedVocabulary.user_id == user_id,
-            RecommendedVocabulary.remark == "baseline",
-        )
+        .filter(RecommendedVocabulary.user_id == user_id, RecommendedVocabulary.source == SOURCE_FALLBACK)
+        .order_by(RecommendedVocabulary.recommended_at.asc())
         .all()
+    )
+    removed = 0
+    for row in rows:
+        if removed >= count:
+            break
+        if row.word_id in touched:
+            continue
+        db.delete(row)
+        removed += 1
+    if removed:
+        db.commit()
+
+
+def _top_up_from_lexicon(user: User, count: int, db: Session) -> int:
+    """Deterministic fallback: unseen lexicon words at the learner's level, then adjacent levels."""
+    if count <= 0:
+        return 0
+    level = user.estimated_cefr if user.estimated_cefr in CEFR_LEVELS else "B1"
+    idx = CEFR_LEVELS.index(level)
+    levels = [level]
+    for step in range(1, len(CEFR_LEVELS)):
+        if idx - step >= 0:
+            levels.append(CEFR_LEVELS[idx - step])
+        if idx + step < len(CEFR_LEVELS):
+            levels.append(CEFR_LEVELS[idx + step])
+
+    seen = {
+        word_id for (word_id,) in db.query(UserVocabularyVector.word_id)
+        .filter(UserVocabularyVector.user_id == user.user_id).all()
+    } | {
+        word_id for (word_id,) in db.query(RecommendedVocabulary.word_id)
+        .filter(RecommendedVocabulary.user_id == user.user_id).all()
     }
 
-    exclude_ids = known_ids | used_ids | already_rec_ids
+    picked: list[Lexicon] = []
+    for lvl in levels:
+        pool = [
+            lex for lex in db.query(Lexicon).filter(Lexicon.cefr_level == lvl).all()
+            if lex.word_id not in seen and is_target_candidate(lex)
+        ]
+        random.shuffle(pool)
+        for lex in pool:
+            picked.append(lex)
+            seen.add(lex.word_id)
+            if len(picked) >= count:
+                break
+        if len(picked) >= count:
+            break
 
-    pool = (
-        db.query(Lexicon)
-        .filter(Lexicon.cefr_level == cefr)
-        .all()
-    )
-    candidates = [
-        lex for lex in pool
-        if lex.word_id not in exclude_ids and _is_target_candidate(lex)
-    ]
-
-    if len(candidates) < target_count:
-        cefr_order = ["A1", "A2", "B1", "B2", "C1", "C2"]
-        idx = cefr_order.index(cefr) if cefr in cefr_order else 2
-        adjacent = []
-        if idx > 0:
-            adjacent.append(cefr_order[idx - 1])
-        if idx < len(cefr_order) - 1:
-            adjacent.append(cefr_order[idx + 1])
-        for lvl in adjacent:
-            extra = db.query(Lexicon).filter(Lexicon.cefr_level == lvl).all()
-            candidates += [
-                lex for lex in extra
-                if lex.word_id not in exclude_ids and _is_target_candidate(lex)
-            ]
-
-    _random.shuffle(candidates)
-    selected = candidates[:target_count]
-
-    # Save selected words to RecommendedVocabulary tagged with the phase remark
-    new_count = 0
-    for lex in selected:
-        exists = db.query(RecommendedVocabulary).filter(
-            RecommendedVocabulary.user_id == user_id,
-            RecommendedVocabulary.word_id == lex.word_id,
-        ).first()
-        if not exists:
-            db.add(RecommendedVocabulary(
-                user_id=user_id,
-                word_id=lex.word_id,
-                remark="baseline",
-            ))
-            new_count += 1
-
-    try:
-        db.commit()
-    except Exception:
-        db.rollback()
-
-    logger.info(
-        "[Baseline KRS] user=%s cefr=%s phase=%d pool=%d selected=%d saved=%d",
-        user_id, cefr, study_phase, len(candidates), len(selected), new_count,
-    )
-    return [lex.word_id for lex in selected]
+    for lex in picked:
+        db.add(RecommendedVocabulary(user_id=user.user_id, word_id=lex.word_id, source=SOURCE_FALLBACK))
+    db.commit()
+    return len(picked)
