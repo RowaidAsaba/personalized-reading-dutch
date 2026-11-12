@@ -1,51 +1,60 @@
 export type CefrLevel = "A1" | "A2" | "B1" | "B2" | "C1" | "C2";
+export const CEFR_LEVELS: readonly CefrLevel[] = ["A1", "A2", "B1", "B2", "C1", "C2"];
 
 export const PURPOSES = ["work", "study", "integration", "travel", "other"] as const;
 export type Purpose = (typeof PURPOSES)[number];
 
+export const GENDERS = [
+  { value: "female", label: "Female" },
+  { value: "male", label: "Male" },
+  { value: "non_binary", label: "Non-binary" },
+  { value: "prefer_not_to_say", label: "Prefer not to say" },
+] as const;
+export type Gender = (typeof GENDERS)[number]["value"];
+
 export interface User {
   id: string;
-  user_id: string;
   email: string;
   name: string;
   display_name: string;
   interests: string[];
   cefrLevel: CefrLevel | null;
-  assessedAt: string | null;
-  createdAt: string | null;
+  effectiveCefr: CefrLevel | null;
+  difficultyOffset: number;
   onboarding_completed: boolean;
+  hasPassword: boolean;
+  hasGoogle: boolean;
+  createdAt: string | null;
 
   age?: number | null;
   city?: string | null;
+  gender?: Gender | null;
   job?: string | null;
   academic_background?: string | null;
   mother_language?: string | null;
   other_languages?: string | null;
   purpose?: Purpose | null;
+}
 
-  has_switched_conditions?: boolean;
+export interface ProfileUpdate {
+  display_name?: string;
+  age?: number;
+  city?: string;
+  gender?: Gender | "";
+  job?: string;
+  academic_background?: string;
+  mother_language?: string;
+  other_languages?: string;
+  purpose?: string;
+  interests?: string[];
+  estimated_cefr?: string;
+  difficulty_offset?: number;
 }
 
 export interface BilingualSentence {
   nl: string;
   en: string;
 }
-
-export type WordStatus = "unknown" | "learning" | "learned";
-
-export interface VocabularyWord {
-  wordId: string;
-  dutch: string;
-  english: string;
-  status: WordStatus;
-  difficulty: number;
-  exposureCount: number;
-  lastSeen: string | null;
-  reviewPriority: number;
-}
-
-export type HighlightType = "unknown" | "learning";
-export type UsageFrequency = "common" | "moderate" | "rare";
 
 export interface LexiconEntry {
   word_id: number;
@@ -56,6 +65,8 @@ export interface LexiconEntry {
   use_cases?: Array<BilingualSentence> | null;
 }
 
+export type HighlightType = "unknown" | "learning";
+
 export interface HighlightedWord {
   wordId: string;
   dutch: string;
@@ -64,7 +75,7 @@ export interface HighlightedWord {
   endIndex: number;
   highlightType: HighlightType;
   exampleSentences: BilingualSentence[];
-  usageFrequency: UsageFrequency;
+  usageFrequency: "common" | "moderate" | "rare";
 }
 
 export interface TextToken {
@@ -84,19 +95,31 @@ export interface ReadingSession {
   cefrLevel: string;
   highlights: HighlightedWord[];
   readingNumber: number;
-  surveyCompleted: boolean;
+  ended: boolean;
+  endedAt: string | null;
+  continuationCount: number;
   wordTranslations: Record<string, string>;
 }
 
 export interface SessionSummary {
   session_id: number;
-  user_id: string;
   title: string;
   topic_used: string | null;
   reading_number: number;
-  study_phase: number;
-  survey_completed: boolean;
-  created_at?: string | null;
+  cefr_level: string | null;
+  ended: boolean;
+  ended_at: string | null;
+  created_at: string | null;
+  continuation_count: number;
+}
+
+export type Rating = 1 | 2 | 3 | 4 | 5;
+
+export interface ReadingFeedback {
+  difficulty: Rating;   // 1 too easy .. 3 normal .. 5 too difficult
+  interest: Rating;
+  relevance: Rating;
+  worth_time: Rating;
 }
 
 export interface ReadingProductivity {
@@ -107,6 +130,9 @@ export interface ReadingProductivity {
 
 export interface DashboardStats {
   cefr_level: string;
+  effective_cefr: string | null;
+  difficulty_offset: number;
+  words_known_goal: number;
   acquisition_score: number;
   total_known: number;
   total_learning: number;
@@ -124,67 +150,20 @@ export interface DashboardStats {
   is_new: boolean;
 }
 
-export type ReviewInterval = "today" | "1d" | "2d" | "4d" | "1w" | "1m" | "never" | null;
+export type VocabStatus = "new" | "encountered" | "learning" | "mastered";
 
 export interface FlashcardItem {
   wordId: string;
   dutch: string;
   english: string;
+  cefrLevel?: string;
   examples: BilingualSentence[];
   exampleSentence: BilingualSentence;
-  difficulty: number;
-  mode: "learning" | "review";
+  status: VocabStatus;
+  masteryScore: number;
   nextReviewDate: string | null;
-  reviewInterval: ReviewInterval;
-}
-
-export type InteractionAction = "deep_processing" | "acquisition_intent" | "word_avoidance";
-export type InteractionWeight = 5 | 2 | 1;
-
-export interface WordInteraction {
-  wordId: string;
-  sessionId: string;
-  action: InteractionAction;
-  weight: InteractionWeight;
-  timestamp: string;
-}
-
-export type LikertScale = 1 | 2 | 3 | 4 | 5;
-export type TLXScale = 1 | 2 | 3 | 4 | 5 | 6 | 7;
-
-export interface SurveyResponse {
-  sessionId: string;
-  worthMyTime: LikertScale;
-  appropriateChallenge: LikertScale;
-  comprehension: LikertScale;
-  focusedAttention: LikertScale;
-  reward: LikertScale;
-  perceivedRelevance: LikertScale;
-  mentalEffort: TLXScale;
-  perceivedPersonalization: LikertScale;
-  duration_seconds?: number;
-}
-
-export interface VocabTestQuestion {
-  questionId: string;
-  wordId: string;
-  dutch: string;
-  prompt: string;
-  options: string[];
-  correctIndex: number;
-}
-
-export interface VocabTestAnswer {
-  word_id: string;
-  chosen_answer: string;
-  is_correct: boolean;
-}
-
-export interface VocabTestResult {
-  sessionGroupId: number;
-  answers: VocabTestAnswer[];
-  correct: number;
-  total: number;
+  reviewInterval: number | null;
+  lookupCount: number;
 }
 
 export interface AssessmentWord {
@@ -198,15 +177,6 @@ export interface AssessmentBatchData {
   batchNumber: number;
   totalBatches: number;
   words: AssessmentWord[];
-}
-
-export type AssessmentBatch = AssessmentBatchData;
-
-export interface AssessmentResult {
-  knownWordIds: string[];
-  unknownWordIds: string[];
-  estimatedLevel: string;
-  confidenceScore: number;
 }
 
 export type ApiResponse<T> =

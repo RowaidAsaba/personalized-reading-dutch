@@ -1,38 +1,139 @@
-import {
-  apiClient,
-  extractError,
-  readingGenerationTimeoutMs,
-} from "./http";
+import { apiClient, extractError, readingGenerationTimeoutMs } from "./http";
 import { mapSessionResponse } from "./sessionMapper";
 import type {
   ApiResponse,
   AssessmentBatchData,
   FlashcardItem,
   LexiconEntry,
+  ProfileUpdate,
+  ReadingFeedback,
   ReadingSession,
   SessionSummary,
-  SurveyResponse,
   User,
-  VocabTestAnswer,
-  VocabTestQuestion,
-  WordInteraction,
 } from "../types";
 
 export { apiClient } from "./http";
 
-interface BackendAuthResponse {
-  user_id: string;
+// ---------------------------------------------------------------- auth
+
+interface BackendUser {
+  id: string;
   email: string;
-  display_name?: string;
-  estimated_cefr?: string;
+  display_name?: string | null;
+  interests?: string[];
+  estimated_cefr?: string | null;
+  effective_cefr?: string | null;
+  difficulty_offset?: number;
   onboarding_completed: boolean;
-  has_switched_conditions?: boolean;
+  has_password?: boolean;
+  has_google?: boolean;
+  age?: number | null;
+  city?: string | null;
+  gender?: string | null;
+  job?: string | null;
+  academic_background?: string | null;
+  mother_language?: string | null;
+  other_languages?: string | null;
+  purpose?: string | null;
+  created_at?: string | null;
 }
+
+interface BackendAuthResponse {
+  access_token: string;
+  token_type: string;
+  user: BackendUser;
+}
+
+export interface AuthResult {
+  user: User;
+  token: string;
+}
+
+function mapUser(data: BackendUser): User {
+  const displayName = data.display_name ?? "";
+  return {
+    id: data.id,
+    email: data.email,
+    name: displayName || data.email.split("@")[0],
+    display_name: displayName,
+    interests: Array.isArray(data.interests) ? data.interests : [],
+    cefrLevel: (data.estimated_cefr as User["cefrLevel"]) ?? null,
+    effectiveCefr: (data.effective_cefr as User["effectiveCefr"]) ?? null,
+    difficultyOffset: data.difficulty_offset ?? 0,
+    onboarding_completed: Boolean(data.onboarding_completed),
+    hasPassword: Boolean(data.has_password),
+    hasGoogle: Boolean(data.has_google),
+    createdAt: data.created_at ?? null,
+    age: data.age ?? null,
+    city: data.city ?? null,
+    gender: (data.gender as User["gender"]) ?? null,
+    job: data.job ?? null,
+    academic_background: data.academic_background ?? null,
+    mother_language: data.mother_language ?? null,
+    other_languages: data.other_languages ?? null,
+    purpose: (data.purpose as User["purpose"]) ?? null,
+  };
+}
+
+function mapAuth(data: BackendAuthResponse): AuthResult {
+  return { user: mapUser(data.user), token: data.access_token };
+}
+
+export async function register(email: string, password: string, displayName?: string): Promise<AuthResult> {
+  try {
+    const { data } = await apiClient.post<BackendAuthResponse>("/auth/register", {
+      email,
+      password,
+      display_name: displayName || undefined,
+    });
+    return mapAuth(data);
+  } catch (err) {
+    throw new Error(extractError(err));
+  }
+}
+
+export async function login(email: string, password: string): Promise<AuthResult> {
+  try {
+    const { data } = await apiClient.post<BackendAuthResponse>("/auth/login", { email, password });
+    return mapAuth(data);
+  } catch (err) {
+    throw new Error(extractError(err));
+  }
+}
+
+export async function googleSignIn(credential: string): Promise<AuthResult> {
+  try {
+    const { data } = await apiClient.post<BackendAuthResponse>("/auth/google", { credential });
+    return mapAuth(data);
+  } catch (err) {
+    throw new Error(extractError(err));
+  }
+}
+
+export async function fetchMe(): Promise<User> {
+  try {
+    const { data } = await apiClient.get<BackendUser>("/users/me");
+    return mapUser(data);
+  } catch (err) {
+    throw new Error(extractError(err));
+  }
+}
+
+export async function saveProfile(update: ProfileUpdate): Promise<User> {
+  try {
+    const { data } = await apiClient.put<BackendUser>("/users/me/profile", update);
+    return mapUser(data);
+  } catch (err) {
+    throw new Error(extractError(err));
+  }
+}
+
+// ---------------------------------------------------------------- onboarding word check
 
 interface BackendAssessmentWord {
   word_id: string | number;
   dutch: string;
-  english?: string;
+  english?: string | null;
   is_pseudo?: boolean;
 }
 
@@ -42,210 +143,19 @@ interface BackendAssessmentBatch {
   words?: BackendAssessmentWord[];
 }
 
-function mapAuthResponseToUser(data: BackendAuthResponse): User {
-  return {
-    id: data.user_id,
-    user_id: data.user_id,
-    email: data.email,
-    name: data.display_name || data.email.split("@")[0],
-    display_name: data.display_name || "",
-    interests: [],
-    cefrLevel: (data.estimated_cefr as User["cefrLevel"]) ?? null,
-    assessedAt: null,
-    createdAt: new Date().toISOString(),
-    onboarding_completed: data.onboarding_completed,
-    has_switched_conditions: data.has_switched_conditions ?? false,
-  };
-}
-
-export async function registerUser(
-  studyId: string,
-  password: string,
-  startCondition?: string,
-): Promise<User> {
-  try {
-    const { data } = await apiClient.post<BackendAuthResponse>("/auth/register", {
-      email: studyId,
-      password,
-      study_code: studyId,
-      ...(startCondition ? { start_condition: startCondition } : {}),
-    });
-    return mapAuthResponseToUser(data);
-  } catch (err) {
-    throw new Error(extractError(err));
-  }
-}
-
-export async function login(studyId: string, password: string): Promise<User> {
-  try {
-    const { data } = await apiClient.post<BackendAuthResponse>("/auth/login", {
-      email: studyId,
-      password,
-    });
-    return mapAuthResponseToUser(data);
-  } catch (err) {
-    throw new Error(extractError(err));
-  }
-}
-
-export async function fetchMe(userId: string): Promise<User> {
-  try {
-    const { data } = await apiClient.get<{ success: boolean; data: Record<string, unknown> }>(
-      "/users/me",
-      { headers: { "X-User-Id": userId } },
-    );
-    const profileData = data.data;
-    return {
-      id: String(profileData.id ?? profileData.user_id ?? ""),
-      user_id: String(profileData.user_id ?? ""),
-      email: String(profileData.email ?? ""),
-      name: String(profileData.display_name || profileData.name || ""),
-      display_name: String(profileData.display_name ?? ""),
-      interests: Array.isArray(profileData.interests) ? (profileData.interests as string[]) : [],
-      cefrLevel: (profileData.cefrLevel as User["cefrLevel"]) ?? null,
-      assessedAt: null,
-      createdAt: String(profileData.createdAt ?? ""),
-      onboarding_completed: Boolean(profileData.onboarding_completed),
-      age: typeof profileData.age === "number" ? profileData.age : null,
-      city: typeof profileData.city === "string" ? profileData.city : null,
-      job: typeof profileData.job === "string" ? profileData.job : null,
-      academic_background: typeof profileData.academic_background === "string" ? profileData.academic_background : null,
-      mother_language: typeof profileData.mother_language === "string" ? profileData.mother_language : null,
-      other_languages: typeof profileData.other_languages === "string" ? profileData.other_languages : null,
-      purpose: typeof profileData.purpose === "string" ? (profileData.purpose as User["purpose"]) : null,
-    };
-  } catch (err) {
-    throw new Error(extractError(err));
-  }
-}
-
-export async function saveProfile(user: Partial<User> & { id: string }): Promise<void> {
-  try {
-    await apiClient.put(
-      "/users/me/profile",
-      {
-        display_name: user.display_name,
-        age: user.age,
-        city: user.city,
-        job: user.job,
-        academic_background: user.academic_background,
-        mother_language: user.mother_language,
-        other_languages: user.other_languages,
-        purpose: user.purpose,
-        interests: user.interests,
-        estimated_cefr: user.cefrLevel,
-      },
-      { headers: { "X-User-Id": user.id } },
-    );
-  } catch (err) {
-    throw new Error(extractError(err));
-  }
-}
-
-export async function completeOnboarding(userId: string): Promise<void> {
-  try {
-    await apiClient.post(
-      "/users/me/complete-onboarding",
-      {},
-      { headers: { "X-User-Id": userId } },
-    );
-  } catch (err) {
-    throw new Error(extractError(err));
-  }
-}
-
-export async function savePersonalInfo(
-  userId: string,
-  info: {
-    display_name?: string;
-    age?: number;
-    city?: string;
-    job?: string;
-    academic_background?: string;
-    mother_language?: string;
-    other_languages?: string;
-    purpose?: string;
-    self_reported_cefr?: string;
-  },
-): Promise<void> {
-  try {
-    await apiClient.post("/onboarding/personal-info", { user_id: userId, ...info });
-  } catch (err) {
-    throw new Error(extractError(err));
-  }
-}
-
-export async function selectOnboardingWords(
-  userId: string,
-  isRefill: boolean = false,
-  studyPhase: number = 1,
-): Promise<LexiconEntry[]> {
-  try {
-    const { data } = await apiClient.post<{ words: LexiconEntry[] }>(
-      `/onboarding/words/${userId}?is_refill=${isRefill}&study_phase=${studyPhase}`,
-    );
-    return data.words ?? [];
-  } catch (err) {
-    throw new Error(extractError(err));
-  }
-}
-
-export async function getOnboardingWords(
-  userId: string,
-  studyPhase: number = 1,
-): Promise<LexiconEntry[]> {
-  try {
-    const { data } = await apiClient.get<{ words: LexiconEntry[] }>(
-      `/onboarding/words/${userId}`,
-      { params: { study_phase: studyPhase } },
-    );
-    return data.words ?? [];
-  } catch (err) {
-    throw new Error(extractError(err));
-  }
-}
-
-export interface OnboardingWordSetStatus {
-  study_phase: number;
-  target_count: number;
-  selected_count: number;
-  learning_count: number;
-  ready: boolean;
-}
-
-export async function getOnboardingWordSetStatus(
-  userId: string,
-  studyPhase: number = 1,
-): Promise<OnboardingWordSetStatus> {
-  try {
-    const { data } = await apiClient.get<OnboardingWordSetStatus>(
-      `/onboarding/words/${userId}/status`,
-      { params: { study_phase: studyPhase } },
-    );
-    return data;
-  } catch (err) {
-    throw new Error(extractError(err));
-  }
-}
-
 export async function getAssessmentBatch(
   batchNumber: number,
-  userId: string,
   selfReportedCefr: string,
   knownWords?: string[],
   allWords?: string[],
 ): Promise<ApiResponse<AssessmentBatchData>> {
   try {
-    const { data } = await apiClient.post<BackendAssessmentBatch>(
-      "/assessment/batch/generate",
-      {
-        user_id: userId,
-        batch_number: batchNumber,
-        self_reported_cefr: selfReportedCefr,
-        known_words: knownWords ?? [],
-        all_words: allWords ?? [],
-      },
-    );
+    const { data } = await apiClient.post<BackendAssessmentBatch>("/assessment/batch/generate", {
+      batch_number: batchNumber,
+      self_reported_cefr: selfReportedCefr,
+      known_words: knownWords ?? [],
+      all_words: allWords ?? [],
+    });
     return {
       success: true,
       data: {
@@ -265,17 +175,15 @@ export async function getAssessmentBatch(
 }
 
 export async function submitAssessment(
-  userId: string,
   batchNumber: number,
   knownWordIds: string[],
   allWordIds: string[],
   estimatedLevel: string,
   confidenceScore: number,
   isFinal: boolean,
-): Promise<void> {
+): Promise<{ estimatedCefr: string | null }> {
   try {
-    await apiClient.post("/assessment/submit", {
-      user_id: userId,
+    const { data } = await apiClient.post<{ estimated_cefr?: string | null }>("/assessment/submit", {
       batch_number: batchNumber,
       known_word_ids: knownWordIds,
       all_word_ids: allWordIds,
@@ -283,69 +191,19 @@ export async function submitAssessment(
       confidence_score: confidenceScore,
       is_final: isFinal,
     });
+    return { estimatedCefr: data.estimated_cefr ?? null };
   } catch (err) {
     throw new Error(extractError(err));
   }
 }
 
-export async function generateSession(userId: string): Promise<{ sessionId: string; readingNumber: number }> {
+// ---------------------------------------------------------------- readings
+
+export async function generateSession(): Promise<ReadingSession> {
   try {
     const { data } = await apiClient.post<Record<string, unknown>>(
       "/session/generate",
-      {
-        user_id: userId,
-      },
-      { timeout: readingGenerationTimeoutMs },
-    );
-    return {
-      sessionId: String(data.session_id),
-      readingNumber: Number(data.reading_number ?? 1),
-    };
-  } catch (err) {
-    throw new Error(extractError(err));
-  }
-}
-
-export async function getReadingSession(
-  sessionId: string,
-  userId?: string,
-): Promise<ApiResponse<ReadingSession>> {
-  try {
-    const { data } = await apiClient.get<Record<string, unknown>>(
-      `/session/${sessionId}`,
-      { params: { user_id: userId } },
-    );
-    return { success: true, data: mapSessionResponse(data) };
-  } catch (err) {
-    return { success: false, error: extractError(err) };
-  }
-}
-
-export async function listSessions(
-  userId: string,
-  studyPhase?: number,
-): Promise<SessionSummary[]> {
-  try {
-    const params: Record<string, string | number> = { user_id: userId };
-    if (studyPhase !== undefined) params.study_phase = studyPhase;
-    const { data } = await apiClient.get<SessionSummary[]>("/session/list", { params });
-    return data;
-  } catch {
-    return [];
-  }
-}
-
-export async function continueSession(
-  userId: string,
-  previousSessionId: string,
-): Promise<ReadingSession> {
-  try {
-    const { data } = await apiClient.post<Record<string, unknown>>(
-      "/session/continue",
-      {
-        user_id: userId,
-        previous_session_id: previousSessionId,
-      },
+      {},
       { timeout: readingGenerationTimeoutMs },
     );
     return mapSessionResponse(data);
@@ -354,97 +212,89 @@ export async function continueSession(
   }
 }
 
+export async function getReadingSession(sessionId: string): Promise<ApiResponse<ReadingSession>> {
+  try {
+    const { data } = await apiClient.get<Record<string, unknown>>(`/session/${sessionId}`);
+    return { success: true, data: mapSessionResponse(data) };
+  } catch (err) {
+    return { success: false, error: extractError(err) };
+  }
+}
+
+export async function listSessions(): Promise<SessionSummary[]> {
+  try {
+    const { data } = await apiClient.get<SessionSummary[]>("/session/list");
+    return data;
+  } catch {
+    return [];
+  }
+}
+
+export async function continueSession(sessionId: string): Promise<ReadingSession> {
+  try {
+    const { data } = await apiClient.post<Record<string, unknown>>(
+      `/session/${sessionId}/continue`,
+      {},
+      { timeout: readingGenerationTimeoutMs },
+    );
+    return mapSessionResponse(data);
+  } catch (err) {
+    throw new Error(extractError(err));
+  }
+}
+
+export async function endSession(
+  sessionId: string,
+  options: { durationSeconds?: number; feedback?: ReadingFeedback },
+): Promise<ReadingSession> {
+  try {
+    const { data } = await apiClient.post<Record<string, unknown>>(`/session/${sessionId}/end`, {
+      duration_seconds: options.durationSeconds,
+      feedback: options.feedback,
+    });
+    return mapSessionResponse(data);
+  } catch (err) {
+    throw new Error(extractError(err));
+  }
+}
+
+// ---------------------------------------------------------------- words
+
 export async function defineWord(word: string): Promise<LexiconEntry | null> {
   try {
-    const { data } = await apiClient.get<LexiconEntry>(
-      `/lexicon/define/${encodeURIComponent(word)}`,
-    );
+    const { data } = await apiClient.get<LexiconEntry>(`/lexicon/define/${encodeURIComponent(word)}`);
     return data;
   } catch {
     return null;
   }
 }
 
-export async function addToLearnList(
-  userId: string,
-  wordId: number,
-  reviewIntervalDays?: number,
-  force?: boolean
-): Promise<void> {
-  await apiClient.patch("/vocab/add-to-learn", {
-    user_id: userId,
-    word_id: wordId,
-    review_interval_days: reviewIntervalDays,
-    force: force,
-  });
+export interface LookupResult {
+  counted: boolean;
+  status: "new" | "encountered" | "learning" | "mastered";
+  demoted: boolean;
 }
 
-export async function markKnown(
-  userId: string,
-  wordId: number,
-): Promise<void> {
-  await apiClient.patch("/vocab/mark-known", {
-    user_id: userId,
-    word_id: wordId,
-  });
-}
-
-export async function markWordDecision(
-  userId: string,
-  wordId: number,
-  studyPhase: number,
-  toTested: boolean,
-): Promise<void> {
-  await apiClient.post("/onboarding/words/mark-decision", {
-    user_id: userId,
-    word_id: wordId,
-    study_phase: studyPhase,
-    to_be_tested: toTested,
-  });
-}
-
-export async function submitSurvey(
-  survey: SurveyResponse,
-): Promise<ApiResponse<{ signal: Record<string, unknown> }>> {
+export async function lookupWord(wordId: string, sessionId?: string): Promise<LookupResult | null> {
   try {
-    const { data } = await apiClient.post<{ success: boolean; signal: Record<string, unknown> }>(
-      "/surveys",
-      {
-        sessionId: String(survey.sessionId),
-        worthMyTime: survey.worthMyTime,
-        appropriateChallenge: survey.appropriateChallenge,
-        comprehension: survey.comprehension,
-        focusedAttention: survey.focusedAttention,
-        reward: survey.reward,
-        perceivedRelevance: survey.perceivedRelevance,
-        mentalEffort: survey.mentalEffort,
-        perceivedPersonalization: survey.perceivedPersonalization,
-        duration_seconds: survey.duration_seconds,
-      },
-    );
-    return { success: true, data: { signal: data.signal } };
-  } catch (err) {
-    return { success: false, error: extractError(err) };
+    const { data } = await apiClient.post<LookupResult>("/vocab/lookup", {
+      word_id: parseInt(wordId, 10),
+      session_id: sessionId ? parseInt(sessionId, 10) : undefined,
+    });
+    return data;
+  } catch {
+    return null;
   }
 }
 
-export interface FlashcardsResponse {
+export interface ReviewQueue {
   cards: FlashcardItem[];
   due_count: number;
-  not_due_count: number;
   reviewed_today: number;
-  total: number;
+  learning_total: number;
 }
 
-export interface DiscoverCard {
-  wordId: string;
-  dutch: string;
-  english: string;
-  examples: { nl: string; en: string }[];
-  cefrLevel?: string;
-}
-
-function normalizeCard(card: FlashcardItem): FlashcardItem {
+function normalizeCard(card: Omit<FlashcardItem, "exampleSentence">): FlashcardItem {
   const examples = card.examples ?? [];
   return {
     ...card,
@@ -453,238 +303,46 @@ function normalizeCard(card: FlashcardItem): FlashcardItem {
   };
 }
 
-export async function getFlashcards(
-  userId?: string | null,
-  studyPhase?: number | null,
-): Promise<ApiResponse<FlashcardsResponse>> {
-  if (!userId) return { success: false, error: "No user" };
+export async function getReviewQueue(): Promise<ApiResponse<ReviewQueue>> {
   try {
-    const params: Record<string, string | number> = { user_id: userId };
-    if (studyPhase != null) params.study_phase = studyPhase;
-    const { data } = await apiClient.get<FlashcardsResponse>("/flashcards", { params });
+    const { data } = await apiClient.get<ReviewQueue>("/vocab/review");
+    return { success: true, data: { ...data, cards: (data.cards ?? []).map(normalizeCard) } };
+  } catch (err) {
+    return { success: false, error: extractError(err) };
+  }
+}
+
+export async function getDiscoverWords(limit = 20): Promise<ApiResponse<{ words: FlashcardItem[]; remaining: number }>> {
+  try {
+    const { data } = await apiClient.get<{ words: FlashcardItem[]; remaining: number }>("/vocab/discover", {
+      params: { limit },
+      timeout: 90_000,
+    });
     return {
       success: true,
-      data: {
-        ...data,
-        cards: (data.cards ?? []).map(normalizeCard),
-      },
+      data: { words: (data.words ?? []).map(normalizeCard), remaining: data.remaining ?? 0 },
     };
   } catch (err) {
     return { success: false, error: extractError(err) };
   }
 }
 
-export async function discoverPrefetch(
-  userId: string,
-  studyPhase?: number | null,
-): Promise<{ words: DiscoverCard[]; remaining: number }> {
-  try {
-    const params: Record<string, string | number> = { user_id: userId };
-    if (studyPhase != null) params.study_phase = studyPhase;
-    const { data } = await apiClient.get<{ words: DiscoverCard[]; remaining: number }>(
-      "/flashcards/discover-prefetch",
-      { params },
-    );
-    return { words: data.words ?? [], remaining: data.remaining ?? data.words?.length ?? 0 };
-  } catch {
-    return { words: [], remaining: 0 };
-  }
-}
-
-export async function submitFlashcardReview(
-  userId: string,
-  wordId: string,
-  remembered: boolean,
-  intervalDays?: number,
-): Promise<void> {
-  await apiClient.post("/flashcards/review", {
-    user_id: userId,
+export async function submitReview(wordId: string, remembered: boolean, intervalDays?: number): Promise<void> {
+  await apiClient.post("/vocab/review", {
     word_id: parseInt(wordId, 10),
     remembered,
     interval_days: intervalDays ?? null,
   });
 }
 
-export async function markKnownFlashcard(
-  userId: string,
-  wordId: string,
-): Promise<void> {
-  await apiClient.post("/flashcards/mark-known", {
-    user_id: userId,
-    word_id: parseInt(wordId, 10),
-  });
+export async function markKnown(wordId: string): Promise<void> {
+  await apiClient.post("/vocab/mark-known", { word_id: parseInt(wordId, 10) });
 }
 
-export async function addDiscoveredToLearn(
-  userId: string,
-  wordId: string,
-  intervalDays = 1,
-): Promise<void> {
-  await apiClient.post("/flashcards/add-to-learn", {
-    user_id: userId,
-    word_id: parseInt(wordId, 10),
-    interval_days: intervalDays,
-  });
-}
-
-export async function discoverNewWords(
-  userId: string,
-): Promise<LexiconEntry[]> {
-  try {
-    const { data } = await apiClient.post<{ words: LexiconEntry[] }>(
-      "/flashcards/discover",
-      { user_id: userId },
-    );
-    return data.words ?? [];
-  } catch (err) {
-    throw new Error(extractError(err));
-  }
-}
-
-export async function startVocabTest(
-  userId: string,
-  sessionGroupId: number,
-  studyPhase: number = 1,
-): Promise<ApiResponse<{ questions: VocabTestQuestion[]; sessionGroupId: number }>> {
-  try {
-    const { data } = await apiClient.get<{
-      success: boolean;
-      data: { sessionGroupId: number; questions: VocabTestQuestion[] };
-    }>("/vocab-test/start", {
-      params: { user_id: userId, session_group_id: sessionGroupId, study_phase: studyPhase },
-    });
-    return { success: true, data: data.data };
-  } catch (err) {
-    return { success: false, error: extractError(err) };
-  }
-}
-
-export interface VocabTestSubmitResult {
-  success: boolean;
-  score: number;
-  total: number;
-  next_action: "transition" | "finish";
-  phase_switched?: boolean;
-}
-
-export type VocabTestType = "immediate" | "delayed";
-
-export interface VocabTestProgress {
-  immediateCompleted: number[];
-  delayedCompleted: number[];
-}
-
-interface BackendVocabTestProgress {
-  immediate_completed: number[];
-  delayed_completed: number[];
-}
-
-export async function getVocabTestProgress(userId: string): Promise<VocabTestProgress> {
-  const { data } = await apiClient.get<BackendVocabTestProgress>("/vocab-test/progress", {
-    params: { user_id: userId },
-  });
-  return {
-    immediateCompleted: (data.immediate_completed ?? []).map(Number),
-    delayedCompleted: (data.delayed_completed ?? []).map(Number),
-  };
-}
-
-export interface DelayedVocabTestStatus {
-  due: boolean;
-  sessionGroupId: number | null;
-  studyPhase: number | null;
-  dueAt: string | null;
-  minutesRemaining: number | null;
-  delayMinutes: number | null;
-}
-
-interface BackendDelayedVocabTestStatus {
-  due: boolean;
-  session_group_id: number | null;
-  study_phase: number | null;
-  due_at: string | null;
-  minutes_remaining: number | null;
-  delay_minutes?: number | null;
-}
-
-export async function getDelayedVocabTestStatus(userId: string): Promise<DelayedVocabTestStatus> {
-  const { data } = await apiClient.get<BackendDelayedVocabTestStatus>("/vocab-test/delayed-status", {
-    params: { user_id: userId },
-  });
-  return {
-    due: data.due,
-    sessionGroupId: data.session_group_id,
-    studyPhase: data.study_phase,
-    dueAt: data.due_at,
-    minutesRemaining: data.minutes_remaining,
-    delayMinutes: data.delay_minutes ?? null,
-  };
-}
-
-export async function submitVocabTest(
-  userId: string,
-  sessionGroupId: number,
-  answers: VocabTestAnswer[],
-  score: number,
-  studyPhase: number = 1,
-  isFinal: boolean = false,
-  testType: VocabTestType = "immediate",
-): Promise<VocabTestSubmitResult> {
-  const { data } = await apiClient.post<VocabTestSubmitResult>("/vocab-test/submit", {
-    user_id: userId,
-    session_group_id: sessionGroupId,
-    answers,
-    score,
-    submitted_at: new Date().toISOString(),
-    study_phase: studyPhase,
-    test_type: testType,
-    is_final: isFinal,
-  });
-  return data;
-}
-
-export function logInteraction(interaction: WordInteraction): Promise<void> {
-  return apiClient.post("/telemetry/log", {
-    session_id: interaction.sessionId,
-    word_id: parseInt(interaction.wordId, 10),
-    intent_tag: interaction.action,
-    engagement_weight: interaction.weight,
-  }).then(() => {});
-}
-
-export interface Activity {
-  sessions: Array<{
-    sessionId: string;
-    title: string;
-    topic: string;
-    cefrLevel: string;
-    createdAt: string;
-  }>;
-}
-
-const activityKey = "leeswijs-activity";
-
-export function readActivity(userId: string): Activity {
-  try {
-    const raw = localStorage.getItem(`${activityKey}-${userId}`);
-    return raw ? (JSON.parse(raw) as Activity) : { sessions: [] };
-  } catch {
-    return { sessions: [] };
-  }
-}
-
-export function logSession(
-  userId: string,
-  entry: Activity["sessions"][number],
-): void {
-  const activity = readActivity(userId);
-  const already = activity.sessions.some((s) => s.sessionId === entry.sessionId);
-  if (!already) {
-    activity.sessions.unshift(entry);
-    localStorage.setItem(`${activityKey}-${userId}`, JSON.stringify(activity));
-  }
+export async function addToLearn(wordId: string, intervalDays = 1): Promise<void> {
+  await apiClient.post("/vocab/add-to-learn", { word_id: parseInt(wordId, 10), interval_days: intervalDays });
 }
 
 export function isBackendNotReadyMessage(msg: string): boolean {
-  return msg.includes("backend") || msg.includes("503") || msg.includes("502");
+  return msg.includes("backend") || msg.includes("503") || msg.includes("502") || msg.includes("not configured");
 }
