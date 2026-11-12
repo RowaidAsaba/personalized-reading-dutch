@@ -123,7 +123,7 @@ def _refill_recommendations(user_id: str) -> None:
 
     db = SessionLocal()
     try:
-        ensure_reservoir(user_id, db, force=True)
+        ensure_reservoir(user_id, db)   # fills only while below the floor (generation may already have done it)
     except Exception as exc:  # pragma: no cover
         logger.warning("[Assessment] reservoir refill failed for %s: %s", user_id, exc)
     finally:

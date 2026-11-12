@@ -9,7 +9,7 @@ from sqlalchemy.orm import Session
 
 from app import gemini
 from app.adaptation import build_adaptation
-from app.krs_service import SOURCE_GEMINI, reservoir_rows
+from app.krs_service import SOURCE_GEMINI, ensure_reservoir, reservoir_rows
 from app.models import (
     Lexicon,
     ReadingSession,
@@ -228,6 +228,13 @@ def choose_topic(user_id: str, db: Session, interest_only: bool = False) -> str:
 def _pick_blue_words(user_id: str, count: int, db: Session) -> list[Lexicon]:
     """New target words from the reservoir: never-shown words first, then least exposed."""
     rows = reservoir_rows(user_id, db)
+    if len(rows) < count:
+        # Brand-new user or drained reservoir: refill now rather than teaching nothing.
+        try:
+            ensure_reservoir(user_id, db, minimum=max(count, 10))
+        except Exception as exc:  # pragma: no cover - generation continues without blue words
+            logger.warning("[SessionGen] reservoir refill failed for %s: %s", user_id, exc)
+        rows = reservoir_rows(user_id, db)
     if not rows:
         return []
     vectors = {
