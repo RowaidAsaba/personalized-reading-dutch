@@ -1,20 +1,16 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { useNavigate, useParams, useSearchParams } from "react-router-dom";
+import { useNavigate, useParams } from "react-router-dom";
 import { motion } from "framer-motion";
-import {
-  CheckCircle2,
-  Clock,
-  BookPlus,
-  Loader2,
-} from "lucide-react";
+import { CheckCircle2, Clock, BookPlus, Loader2 } from "lucide-react";
 
 import {
-  getReadingSession,
-  defineWord,
-  isBackendNotReadyMessage,
-  markKnownFlashcard,
   continueSession,
-  logInteraction,
+  defineWord,
+  endSession,
+  getReadingSession,
+  isBackendNotReadyMessage,
+  lookupWord,
+  markKnown,
 } from "../services/api";
 import { easeOut } from "../constants/animation";
 import ErrorBanner from "../components/ErrorBanner";
@@ -23,7 +19,8 @@ import { useReadingTimer } from "../hooks/useReadingTimer";
 import HighlightedText from "../components/reading/HighlightedText";
 import WordModal from "../components/reading/WordModal";
 import WordTooltip, { type TooltipWord } from "../components/reading/WordTooltip";
-import type { BilingualSentence, HighlightedWord, LexiconEntry, TextToken } from "../types";
+import EndReadingModal from "../components/reading/EndReadingModal";
+import type { BilingualSentence, HighlightedWord, LexiconEntry, ReadingFeedback, TextToken } from "../types";
 
 function formatElapsed(ms: number) {
   const total = Math.floor(ms / 1000);
@@ -32,15 +29,13 @@ function formatElapsed(ms: number) {
   return `${m}:${s.toString().padStart(2, "0")}`;
 }
 
-const TEAM_NAMES = new Set(["kim", "kiki", "julian", "tj", "evie", "jy"]);
-
 function wordKey(word: string) {
   return word.trim().toLocaleLowerCase("nl-NL");
 }
 
 function canLookUpWord(word: string) {
   const key = wordKey(word);
-  return key.length > 1 && !/\d/.test(key) && !TEAM_NAMES.has(key);
+  return key.length > 1 && !/\d/.test(key);
 }
 
 function cleanExamples(examples?: BilingualSentence[] | null) {
@@ -50,7 +45,6 @@ function cleanExamples(examples?: BilingualSentence[] | null) {
 export default function ReadingSessionPage() {
   const { sessionId } = useParams<{ sessionId: string }>();
   const navigate = useNavigate();
-  const [searchParams] = useSearchParams();
 
   const currentSession = useStore((s) => s.currentSession);
   const isLoading = useStore((s) => s.isLoadingSession);
@@ -62,16 +56,18 @@ export default function ReadingSessionPage() {
   const [error, setError] = useState<string | null>(null);
   const [continuing, setContinuing] = useState(false);
   const [continueError, setContinueError] = useState<string | null>(null);
+  const [endOpen, setEndOpen] = useState(false);
+  const [ending, setEnding] = useState(false);
 
   const [tooltip, setTooltip] = useState<TooltipWord | null>(null);
   const [markingKnown, setMarkingKnown] = useState(false);
   const [knownOverride, setKnownOverride] = useState<Set<string>>(new Set());
+  const [learningOverride, setLearningOverride] = useState<Set<string>>(new Set());
 
   const [modalWordId, setModalWordId] = useState<string | null>(null);
   const [definedEntries, setDefinedEntries] = useState<Record<string, LexiconEntry>>({});
 
-  const isReviewRoute = searchParams.get("review") === "1";
-  const isReadOnly = isReviewRoute || Boolean(currentSession?.surveyCompleted);
+  const isReadOnly = Boolean(currentSession?.ended);
 
   const { elapsedMs } = useReadingTimer(!!currentSession && !error && !isReadOnly);
   const elapsedRef = useRef(0);
@@ -124,7 +120,6 @@ export default function ReadingSessionPage() {
 
     let start = index;
     while (start > 0 && !/[.!?]/.test(currentSession.tokens[start - 1].text)) start -= 1;
-
     let end = index;
     while (end < currentSession.tokens.length - 1 && !/[.!?]/.test(currentSession.tokens[end].text)) end += 1;
 
@@ -136,6 +131,15 @@ export default function ReadingSessionPage() {
       .trim();
 
     return sentence ? [{ nl: sentence, en: "" }] : [];
+  }
+
+  function recordLookup(wordId: string) {
+    if (isReadOnly || !currentSession) return;
+    void lookupWord(wordId, currentSession.sessionId).then((result) => {
+      if (result?.demoted) {
+        setLearningOverride((prev) => new Set([...prev, wordId]));
+      }
+    });
   }
 
   async function fetchMissingTranslation(word: string, wordId?: string | null) {
@@ -165,6 +169,7 @@ export default function ReadingSessionPage() {
           }
         : prev
       );
+      recordLookup(String(entry.word_id));
     } catch (err) {
       const msg = err instanceof Error ? err.message : "";
       setTooltip((prev) => prev && wordKey(prev.word) === key
@@ -174,12 +179,18 @@ export default function ReadingSessionPage() {
             loading: false,
             wordId: wordId ?? prev.wordId,
             message: isBackendNotReadyMessage(msg)
-              ? "Translation needs backend support."
+              ? "Translation needs the text generator to be configured."
               : "Translation not available yet.",
           }
         : prev
       );
     }
+  }
+
+  function tokenStatus(wordId: string | null | undefined, status: TextToken["status"]) {
+    if (wordId && knownOverride.has(wordId)) return "known" as const;
+    if (wordId && learningOverride.has(wordId)) return "learning" as const;
+    return status;
   }
 
   function handleHighlightClick(token: TextToken, el: HTMLElement) {
@@ -193,9 +204,11 @@ export default function ReadingSessionPage() {
       loading: !localEntry?.english && canLookup,
       anchor: { top: rect.top, left: rect.left, width: rect.width, height: rect.height },
       wordId: localEntry?.wordId ?? wordId,
-      status: wordId && knownOverride.has(wordId) ? "known" : token.status,
-      message: canLookup ? undefined : "This looks like a name, so it is not added to vocabulary.",
+      status: tokenStatus(wordId, token.status),
+      message: canLookup ? undefined : "This looks like a name or number, so it is not added to vocabulary.",
     });
+    const knownId = localEntry?.wordId ?? wordId;
+    if (localEntry?.english && knownId) recordLookup(knownId);
     if (!localEntry?.english && canLookup) void fetchMissingTranslation(token.text, wordId);
   }
 
@@ -213,9 +226,11 @@ export default function ReadingSessionPage() {
       loading: !localEntry?.english,
       anchor: { top: rect.top, left: rect.left, width: rect.width, height: rect.height },
       wordId: localEntry?.wordId ?? token?.wordId ?? undefined,
-      status: (token?.wordId && knownOverride.has(token.wordId)) ? "known" : token?.status,
+      status: tokenStatus(token?.wordId, token?.status),
     });
 
+    const knownId = localEntry?.wordId ?? token?.wordId;
+    if (localEntry?.english && knownId) recordLookup(knownId);
     if (!localEntry?.english) await fetchMissingTranslation(word, token?.wordId);
   }
 
@@ -224,17 +239,8 @@ export default function ReadingSessionPage() {
     if (!user || !tooltip?.wordId || markingKnown) return;
     setMarkingKnown(true);
     try {
-      await markKnownFlashcard(user.id, tooltip.wordId);
+      await markKnown(tooltip.wordId);
       setKnownOverride((prev) => new Set([...prev, tooltip.wordId!]));
-      if (currentSession) {
-        logInteraction({
-          wordId: tooltip.wordId,
-          sessionId: currentSession.sessionId,
-          action: "word_avoidance",
-          weight: 1,
-          timestamp: new Date().toISOString(),
-        }).catch(() => undefined);
-      }
       setTooltip(null);
     } catch {
       setError("Could not update this word yet.");
@@ -245,15 +251,6 @@ export default function ReadingSessionPage() {
 
   function handleOpenDetail() {
     if (!tooltip?.wordId) return;
-    if (currentSession && !isReadOnly) {
-      logInteraction({
-        wordId: tooltip.wordId,
-        sessionId: currentSession.sessionId,
-        action: "deep_processing",
-        weight: 5,
-        timestamp: new Date().toISOString(),
-      }).catch(() => undefined);
-    }
     setModalWordId(tooltip.wordId);
     setTooltip(null);
   }
@@ -263,13 +260,7 @@ export default function ReadingSessionPage() {
     if (newStatus === "known") {
       setKnownOverride((prev) => new Set([...prev, wordId]));
     } else if (newStatus === "learning" && currentSession) {
-      logInteraction({
-        wordId,
-        sessionId: currentSession.sessionId,
-        action: "acquisition_intent",
-        weight: 2,
-        timestamp: new Date().toISOString(),
-      }).catch(() => undefined);
+      setLearningOverride((prev) => new Set([...prev, wordId]));
       setCurrentSession({
         ...currentSession,
         tokens: currentSession.tokens.map(t =>
@@ -284,19 +275,19 @@ export default function ReadingSessionPage() {
     let cancelled = false;
     setLoadingSession(true);
     setError(null);
-    getReadingSession(sessionId, user?.id)
+    getReadingSession(sessionId)
       .then((res) => {
         if (cancelled) return;
         if (res.success) setCurrentSession(res.data);
-        else setError(res.error ?? "Could not load this session.");
+        else setError(res.error ?? "Could not load this reading.");
       })
       .catch((err: unknown) => {
         if (cancelled) return;
-        setError(err instanceof Error ? err.message : "Could not load this session.");
+        setError(err instanceof Error ? err.message : "Could not load this reading.");
       })
       .finally(() => { if (!cancelled) setLoadingSession(false); });
     return () => { cancelled = true; };
-  }, [sessionId, setCurrentSession, setLoadingSession, user?.id]);
+  }, [sessionId, setCurrentSession, setLoadingSession]);
 
   useEffect(() => { return () => { clearSession(); }; }, [clearSession]);
 
@@ -359,8 +350,9 @@ export default function ReadingSessionPage() {
         const low = rawWord.toLowerCase();
         const match = highlightMap.get(low);
         let status: "learning" | "new" | null = match?.status ?? null;
-        
+
         if (status && match && knownOverride.has(match.wordId)) status = null;
+        if (match && learningOverride.has(match.wordId) && !knownOverride.has(match.wordId)) status = "learning";
         if (!canLookUpWord(rawWord)) status = null;
 
         tokens.push({
@@ -370,10 +362,10 @@ export default function ReadingSessionPage() {
           wordId: match?.wordId ?? null,
         });
       } else {
-        const subParts = part.split(/([^\w\u00C0-\u017F]+)/);
+        const subParts = part.split(/([^\wÀ-ſ]+)/);
         for (const sp of subParts) {
           if (!sp) continue;
-          if (/^[^\w\u00C0-\u017F]+$/.test(sp)) {
+          if (/^[^\wÀ-ſ]+$/.test(sp)) {
             tokens.push({
               text: sp,
               type: /^\s+$/.test(sp) ? "space" : "punctuation",
@@ -391,17 +383,28 @@ export default function ReadingSessionPage() {
         }
       }
     }
-    
-    return tokens;
-  }, [currentSession, knownOverride]);
 
-  function handleFinish() {
-    if (isReadOnly) {
-      navigate("/reading");
-      return;
+    return tokens;
+  }, [currentSession, knownOverride, learningOverride]);
+
+  async function finishReading(feedback?: ReadingFeedback) {
+    if (!sessionId || ending) return;
+    setEnding(true);
+    try {
+      const updated = await endSession(sessionId, {
+        durationSeconds: Math.floor(elapsedRef.current / 1000),
+        feedback,
+      });
+      setCurrentSession(updated);
+      setEndOpen(false);
+      setTooltip(null);
+      setModalWordId(null);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not end this reading.");
+      setEndOpen(false);
+    } finally {
+      setEnding(false);
     }
-    const dur = Math.floor(elapsedRef.current / 1000);
-    navigate(`/survey/${sessionId}?duration=${dur}`);
   }
 
   async function handleContinue() {
@@ -410,7 +413,7 @@ export default function ReadingSessionPage() {
     setContinuing(true);
     setContinueError(null);
     try {
-      const nextSession = await continueSession(user.id, sessionId);
+      const nextSession = await continueSession(sessionId);
       if (currentSession) {
         const existingWordIds = new Set(currentSession.highlights.map((h) => h.wordId));
         const newHighlights = nextSession.highlights.filter(
@@ -428,11 +431,7 @@ export default function ReadingSessionPage() {
       }, 100);
     } catch (err) {
       const message = err instanceof Error ? err.message : "Could not continue this reading.";
-      setContinueError(
-        isBackendNotReadyMessage(message)
-          ? "Continue reading needs backend support. Please finish this reading."
-          : message
-      );
+      setContinueError(message);
     } finally {
       setContinuing(false);
     }
@@ -448,10 +447,10 @@ export default function ReadingSessionPage() {
     );
   }
 
-  if (error) {
+  if (error && !currentSession) {
     return (
       <div className="max-w-3xl mx-auto py-10">
-        <ErrorBanner message={error} title="Couldn't load the session" />
+        <ErrorBanner message={error} title="Couldn't load the reading" />
         <button type="button" onClick={() => navigate("/reading")}
           className="mt-3 text-sm font-heading font-semibold text-red-700 underline">
           Back to Reading
@@ -480,12 +479,19 @@ export default function ReadingSessionPage() {
           <span className="text-[10px] font-semibold px-2 py-0.5 rounded-full bg-primary/10 text-primary uppercase tracking-wide">
             {currentSession.topic}
           </span>
+          {isReadOnly && (
+            <span className="inline-flex items-center gap-1 text-[10px] font-semibold px-2 py-0.5 rounded-full bg-emerald-50 text-emerald-700 uppercase tracking-wide">
+              <CheckCircle2 size={10} /> Ended
+            </span>
+          )}
         </div>
         <h1 className="font-heading text-3xl font-bold text-text">{currentSession.title}</h1>
         <div className="mt-3 flex items-center gap-4 text-xs text-text/50 font-body">
-          <span className="inline-flex items-center gap-1.5">
-            <Clock size={12} /> {formatElapsed(elapsedMs)}
-          </span>
+          {!isReadOnly && (
+            <span className="inline-flex items-center gap-1.5">
+              <Clock size={12} /> {formatElapsed(elapsedMs)}
+            </span>
+          )}
           <span className="inline-flex items-center gap-1.5">
             <span className="w-2 h-2 rounded-sm bg-blue-300" /> {blueCount} new
           </span>
@@ -495,6 +501,8 @@ export default function ReadingSessionPage() {
         </div>
       </header>
 
+      {error && <ErrorBanner message={error} className="mb-4" />}
+
       <div className="mb-3 flex flex-wrap items-center gap-1.5 text-[11px] font-body text-text/45">
         <span className="rounded-md border border-blue-200/80 bg-blue-50 px-1.5 py-0.5 font-semibold text-blue-800">
           New words
@@ -502,6 +510,7 @@ export default function ReadingSessionPage() {
         <span className="rounded-md border border-amber-200/80 bg-amber-50 px-1.5 py-0.5 font-semibold text-amber-800">
           Learning words
         </span>
+        <span>Tap any word for its translation.</span>
       </div>
 
       <div className="mb-6 rounded-lg border border-black/8 bg-white px-6 py-7 shadow-sm shadow-black/5 sm:px-8 sm:py-9">
@@ -530,7 +539,7 @@ export default function ReadingSessionPage() {
               <motion.button
                 type="button"
                 onClick={handleContinue}
-                disabled={continuing}
+                disabled={continuing || ending}
                 whileTap={{ scale: continuing ? 1 : 0.97 }}
                 className={[
                   "inline-flex items-center gap-2 rounded-lg px-5 py-2.5",
@@ -540,30 +549,30 @@ export default function ReadingSessionPage() {
                 ].join(" ")}
               >
                 {continuing ? (
-                  <><Loader2 size={16} className="animate-spin" /> Continuing</>
+                  <><Loader2 size={16} className="animate-spin" /> Writing the next part</>
                 ) : (
-                  <><BookPlus size={16} strokeWidth={2.3} /> Continue reading</>
+                  <><BookPlus size={16} strokeWidth={2.3} /> Continue the story</>
                 )}
               </motion.button>
               <motion.button
                 type="button"
-                onClick={handleFinish}
-                disabled={continuing}
+                onClick={() => setEndOpen(true)}
+                disabled={continuing || ending}
                 whileTap={{ scale: continuing ? 1 : 0.97 }}
                 className={[
                   "inline-flex items-center gap-2 rounded-lg bg-primary px-5 py-2.5",
                   "text-sm font-heading font-semibold text-white",
-                  continuing ? "opacity-60 cursor-not-allowed" : "hover:opacity-90",
+                  continuing || ending ? "opacity-60 cursor-not-allowed" : "hover:opacity-90",
                 ].join(" ")}
               >
-                <CheckCircle2 size={16} strokeWidth={2.3} /> Finish reading
+                <CheckCircle2 size={16} strokeWidth={2.3} /> End reading
               </motion.button>
             </div>
             {continueError ? (
               <p className="max-w-xs text-right text-xs font-body text-red-600">{continueError}</p>
             ) : (
               <p className="text-right text-xs font-body text-text/45 sm:whitespace-nowrap">
-                Read more on this topic, or finish when ready.
+                Keep going on this topic, or end when you are done.
               </p>
             )}
           </>
@@ -572,18 +581,7 @@ export default function ReadingSessionPage() {
 
       <WordTooltip
         lookup={tooltip}
-        onClose={() => {
-          if (tooltip?.wordId && currentSession && !isReadOnly) {
-            logInteraction({
-              wordId: tooltip.wordId,
-              sessionId: currentSession.sessionId,
-              action: "word_avoidance",
-              weight: 1,
-              timestamp: new Date().toISOString(),
-            }).catch(() => undefined);
-          }
-          setTooltip(null);
-        }}
+        onClose={() => setTooltip(null)}
         onOpenDetail={handleOpenDetail}
         onMarkKnown={() => void handleMarkKnown()}
         markingKnown={markingKnown}
@@ -595,6 +593,14 @@ export default function ReadingSessionPage() {
         onClose={() => setModalWordId(null)}
         onWordStatusChange={handleWordStatusChange}
         readOnly={isReadOnly}
+      />
+
+      <EndReadingModal
+        open={endOpen}
+        submitting={ending}
+        onSubmit={(feedback) => void finishReading(feedback)}
+        onSkip={() => void finishReading()}
+        onClose={() => setEndOpen(false)}
       />
     </motion.div>
   );

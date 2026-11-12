@@ -3,7 +3,7 @@ import { motion, AnimatePresence } from "framer-motion";
 import { BookOpenText, X, Check } from "lucide-react";
 import type { HighlightedWord } from "../../types";
 import SpeakButton from "../SpeakButton";
-import { addDiscoveredToLearn, submitFlashcardReview } from "../../services/api";
+import { addToLearn } from "../../services/api";
 import { easeOut } from "../../constants/animation";
 import { useStore } from "../../store";
 
@@ -34,11 +34,8 @@ export default function WordModal({ word, onClose, onWordStatusChange, readOnly 
     if (!user || saving) return;
     setSaving(true);
     try {
-      if (!isNew) {
-        await submitFlashcardReview(user.id, word!.wordId, true);
-      } else {
-        await addDiscoveredToLearn(user.id, word!.wordId);
-      }
+      // New word: add to the review queue. Learning word: re-schedule for tomorrow without touching mastery.
+      await addToLearn(word!.wordId, 1);
       onWordStatusChange?.(word!.wordId, "learning");
       onClose();
     } finally {
