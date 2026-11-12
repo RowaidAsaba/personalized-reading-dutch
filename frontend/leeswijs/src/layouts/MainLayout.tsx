@@ -14,7 +14,6 @@ import {
 } from "lucide-react";
 
 import { useStore } from "../store";
-import DelayedVocabReminder from "../components/DelayedVocabReminder";
 import { easeOut } from "../constants/animation";
 
 const NAV_ITEMS = [
@@ -92,7 +91,7 @@ export default function MainLayout() {
             </p>
           </div>
 
-          <UserMenu cefrLevel={user.cefrLevel ?? "—"} name={user.name} />
+          <UserMenu cefrLevel={user.effectiveCefr ?? user.cefrLevel ?? "—"} name={user.name} />
         </header>
 
         <main className="flex-1 overflow-auto p-4 lg:p-8">
@@ -100,16 +99,14 @@ export default function MainLayout() {
         </main>
       </div>
 
-      <DelayedVocabReminder />
     </div>
   );
 }
 
 function getPageLabel(pathname: string): string {
   if (pathname.startsWith("/read/"))       return "Reading";
-  if (pathname.startsWith("/vocab-test"))  return "Vocabulary check";
   if (pathname.startsWith("/settings"))    return "Settings";
-  return NAV_ITEMS.find((item) => pathname.startsWith(item.to))?.label ?? "Study session";
+  return NAV_ITEMS.find((item) => pathname.startsWith(item.to))?.label ?? "LeesWijs";
 }
 
 function UserMenu({ cefrLevel, name }: { cefrLevel: string; name: string }) {

@@ -1,85 +1,102 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { motion, AnimatePresence } from "framer-motion";
-import { BookOpen, Check, Home, Hourglass, Layers, RotateCcw, Sparkles } from "lucide-react";
+import { BookOpen, Check, Home, Hourglass, Layers, RefreshCw, RotateCcw, Sparkles } from "lucide-react";
+
 import { useStore } from "../store";
 import {
-  addDiscoveredToLearn,
-  discoverPrefetch,
-  getFlashcards,
-  markKnownFlashcard,
-  submitFlashcardReview,
-  type DiscoverCard,
-  type FlashcardsResponse,
+  addToLearn,
+  getDiscoverWords,
+  getReviewQueue,
+  markKnown,
+  submitReview,
+  type ReviewQueue,
 } from "../services/api";
 import type { FlashcardItem } from "../types";
 import SpeakButton from "../components/SpeakButton";
 import ErrorBanner from "../components/ErrorBanner";
 
 type Mode = "review" | "discover";
-const DEFAULT_REVIEW_DAYS = 1;
+const DISCOVER_BATCH = 20;
+const DISCOVER_LOW_WATER = 5;
 
 export default function FlashcardsPage() {
   const navigate = useNavigate();
   const user = useStore((s) => s.user);
   const userId = user?.id;
-  // Phase 2 starts after condition switch; default to phase 1
-  const studyPhase = user?.has_switched_conditions ? 2 : 1;
 
   const [mode, setMode] = useState<Mode>("review");
 
-  const [reviewData, setReviewData] = useState<FlashcardsResponse | null>(null);
+  const [reviewData, setReviewData] = useState<ReviewQueue | null>(null);
   const [reviewLoading, setReviewLoading] = useState(true);
   const [reviewError, setReviewError] = useState<string | null>(null);
   const [reviewedCount, setReviewedCount] = useState(0);
 
-  const [discoverCards, setDiscoverCards] = useState<DiscoverCard[]>([]);
-  const [hasLoadedDiscoverCards, setHasLoadedDiscoverCards] = useState(false);
+  const [discoverCards, setDiscoverCards] = useState<FlashcardItem[]>([]);
+  const [discoverLoading, setDiscoverLoading] = useState(false);
+  const [discoverError, setDiscoverError] = useState<string | null>(null);
+  const [discoverLoaded, setDiscoverLoaded] = useState(false);
+  const decidedIds = useRef<Set<string>>(new Set());
+  const fetching = useRef(false);
 
   const fetchReview = useCallback(() => {
     if (!userId) return;
     setReviewLoading(true);
-    getFlashcards(userId, studyPhase)
+    getReviewQueue()
       .then((res) => {
         if (res.success) setReviewData(res.data);
         else setReviewError(res.error ?? "Could not load word review.");
       })
       .catch(() => setReviewError("Unexpected error."))
       .finally(() => setReviewLoading(false));
-  }, [userId, studyPhase]);
+  }, [userId]);
+
+  const fetchDiscover = useCallback(async () => {
+    if (!userId || fetching.current) return;
+    fetching.current = true;
+    setDiscoverLoading(true);
+    setDiscoverError(null);
+    try {
+      const res = await getDiscoverWords(DISCOVER_BATCH);
+      if (!res.success) {
+        setDiscoverError(res.error);
+        return;
+      }
+      setDiscoverCards((prev) => {
+        const seen = new Set(prev.map((c) => c.wordId));
+        const fresh = res.data.words.filter((w) => !seen.has(w.wordId) && !decidedIds.current.has(w.wordId));
+        return [...prev, ...fresh];
+      });
+    } finally {
+      fetching.current = false;
+      setDiscoverLoading(false);
+      setDiscoverLoaded(true);
+    }
+  }, [userId]);
 
   useEffect(() => {
     fetchReview();
   }, [fetchReview]);
 
   useEffect(() => {
-    if (!userId) return;
-    discoverPrefetch(userId, studyPhase)
-      .then(({ words }) => {
-        setDiscoverCards(words);
-        setHasLoadedDiscoverCards(true);
-      })
-      .catch(() => { setHasLoadedDiscoverCards(true); });
+    void fetchDiscover();
+  }, [fetchDiscover]);
 
-    return () => {
-      const baseUrl = import.meta.env.VITE_API_BASE_URL || "http://localhost:8000/api";
-      navigator.sendBeacon(`${baseUrl}/flashcards/refill-check?user_id=${userId}`);
-    };
-  }, [userId, studyPhase]);
-
-  function openDiscover() {
-    setMode("discover");
-    if (!hasLoadedDiscoverCards && user) {
-      discoverPrefetch(user.id, studyPhase)
-        .then(({ words }) => { setDiscoverCards(words); setHasLoadedDiscoverCards(true); })
-        .catch(() => undefined);
+  useEffect(() => {
+    if (mode === "discover" && discoverLoaded && discoverCards.length < DISCOVER_LOW_WATER && !discoverLoading) {
+      void fetchDiscover();
     }
-  }
+  }, [mode, discoverCards.length, discoverLoaded, discoverLoading, fetchDiscover]);
 
   if (!user) return null;
 
   const dueTotal = reviewData?.due_count ?? 0;
   const dueRemaining = Math.max(0, dueTotal - reviewedCount);
+
+  function handleDiscoverDone(wordId: string) {
+    decidedIds.current.add(wordId);
+    setDiscoverCards((prev) => prev.filter((c) => c.wordId !== wordId));
+  }
 
   return (
     <div className="mx-auto max-w-3xl">
@@ -94,7 +111,9 @@ export default function FlashcardsPage() {
               <p className="text-xs font-body text-text/50">
                 {mode === "review"
                   ? dueTotal === 0 ? "No words due" : `${dueRemaining} due · ${reviewedCount} reviewed`
-                  : `${discoverCards.length} available words`}
+                  : discoverLoading && discoverCards.length === 0
+                    ? "Finding new words for you…"
+                    : `${discoverCards.length} new words ready`}
               </p>
             </div>
           </div>
@@ -104,7 +123,7 @@ export default function FlashcardsPage() {
               <button
                 key={m}
                 type="button"
-                onClick={m === "discover" ? openDiscover : () => setMode("review")}
+                onClick={() => setMode(m)}
                 className={[
                   "flex items-center gap-1.5 rounded-lg px-4 py-1.5 text-sm font-heading font-semibold transition-all",
                   mode === m
@@ -129,20 +148,20 @@ export default function FlashcardsPage() {
               loading={reviewLoading}
               error={reviewError}
               data={reviewData}
-              userId={user.id}
               onHome={() => navigate("/home")}
               onReviewedChange={setReviewedCount}
+              onDiscover={() => setMode("discover")}
             />
           </motion.div>
         ) : (
           <motion.div key="discover" initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0 }}>
             <DiscoverMode
               cards={discoverCards}
-              userId={user.id}
-              onCardDone={(wordId) =>
-                setDiscoverCards((prev) => prev.filter((c) => c.wordId !== wordId))
-              }
+              loading={discoverLoading}
+              error={discoverError}
+              onCardDone={handleDiscoverDone}
               onRefreshReview={fetchReview}
+              onRetry={() => void fetchDiscover()}
               onNavigate={navigate}
             />
           </motion.div>
@@ -153,14 +172,14 @@ export default function FlashcardsPage() {
 }
 
 function ReviewMode({
-  loading, error, data, userId, onHome, onReviewedChange,
+  loading, error, data, onHome, onReviewedChange, onDiscover,
 }: {
   loading: boolean;
   error: string | null;
-  data: FlashcardsResponse | null;
-  userId: string;
+  data: ReviewQueue | null;
   onHome: () => void;
   onReviewedChange: (n: number) => void;
+  onDiscover: () => void;
 }) {
   const [stack, setStack] = useState<FlashcardItem[]>([]);
   const [stackReady, setStackReady] = useState(false);
@@ -180,24 +199,19 @@ function ReviewMode({
 
   const dueCount = data?.due_count ?? 0;
   const serverReviewed = data?.reviewed_today ?? 0;
-  
   const totalDailyTask = dueCount + serverReviewed;
   const totalReviewed = serverReviewed + reviewed;
 
   const progress = totalDailyTask === 0 ? 1 : Math.min(1, totalReviewed / totalDailyTask);
   const barPct = Math.round(progress * 100);
-  const barColor = totalDailyTask === 0 || barPct === 100
-    ? "#10b981"
-    : barPct <= 10
-    ? "#ef4444"
-    : "#f59e0b";
+  const barColor = totalDailyTask === 0 || barPct === 100 ? "#10b981" : barPct <= 10 ? "#ef4444" : "#f59e0b";
 
   const card = stack[0] ?? null;
 
   async function handleRemember() {
     if (!card) return;
     setSaving(true);
-    await submitFlashcardReview(userId, card.wordId, true, DEFAULT_REVIEW_DAYS).catch(() => undefined);
+    await submitReview(card.wordId, true).catch(() => undefined);
     setSaving(false);
     setReviewed((n) => n + 1);
     setStack((prev) => prev.slice(1));
@@ -208,7 +222,7 @@ function ReviewMode({
   function handleForgot() {
     if (!card) return;
     setFlipped(true);
-    void submitFlashcardReview(userId, card.wordId, false).catch(() => undefined);
+    void submitReview(card.wordId, false).catch(() => undefined);
   }
 
   function continueAfterForgot() {
@@ -234,7 +248,7 @@ function ReviewMode({
   );
 
   if (stackReady && stack.length === 0 && !done) return (
-    <EmptyReview onHome={onHome} />
+    <EmptyReview onHome={onHome} onDiscover={onDiscover} learningTotal={data?.learning_total ?? 0} />
   );
 
   if (done || (stackReady && stack.length === 0)) return (
@@ -263,9 +277,6 @@ function ReviewMode({
             transition={{ duration: 0.4, ease: "easeOut" }}
           />
         </div>
-        {(dueCount === 0 || barPct === 100) && (
-          <p className="text-xs text-emerald-600 font-body font-semibold mt-1 text-right">All due reviews are complete.</p>
-        )}
       </div>
 
       <AnimatePresence mode="wait">
@@ -284,11 +295,7 @@ function ReviewMode({
             <div className="flex items-center justify-center gap-2">
               <h2 className="font-heading text-3xl font-bold text-text">{card?.dutch}</h2>
               {card?.dutch && (
-                <SpeakButton
-                  text={card.dutch}
-                  label={`Play pronunciation for ${card.dutch}`}
-                  className="h-9 w-9 shrink-0"
-                />
+                <SpeakButton text={card.dutch} label={`Play pronunciation for ${card.dutch}`} className="h-9 w-9 shrink-0" />
               )}
             </div>
             <p className="text-xs font-body text-text/35 mt-2">
@@ -363,12 +370,14 @@ function ReviewMode({
 }
 
 function DiscoverMode({
-  cards, userId, onCardDone, onRefreshReview, onNavigate,
+  cards, loading, error, onCardDone, onRefreshReview, onRetry, onNavigate,
 }: {
-  cards: DiscoverCard[];
-  userId: string;
+  cards: FlashcardItem[];
+  loading: boolean;
+  error: string | null;
   onCardDone: (wordId: string) => void;
   onRefreshReview: () => void;
+  onRetry: () => void;
   onNavigate: (path: string) => void;
 }) {
   const [saving, setSaving] = useState(false);
@@ -378,7 +387,7 @@ function DiscoverMode({
   async function handleKnown() {
     if (!card) return;
     setSaving(true);
-    await markKnownFlashcard(userId, card.wordId).catch(() => undefined);
+    await markKnown(card.wordId).catch(() => undefined);
     setSaving(false);
     onCardDone(card.wordId);
   }
@@ -386,11 +395,18 @@ function DiscoverMode({
   async function handleAddToLearn() {
     if (!card) return;
     setSaving(true);
-    await addDiscoveredToLearn(userId, card.wordId, DEFAULT_REVIEW_DAYS).catch(() => undefined);
+    await addToLearn(card.wordId, 1).catch(() => undefined);
     setSaving(false);
     onCardDone(card.wordId);
     onRefreshReview();
   }
+
+  if (!card && loading) return (
+    <div className="flex flex-col items-center py-20">
+      <Hourglass size={32} className="text-violet-500 animate-pulse mb-3" />
+      <p className="text-sm font-body text-text/50 animate-pulse">Choosing new words for you…</p>
+    </div>
+  );
 
   if (!card) return (
     <div className="max-w-md mx-auto bg-white rounded-2xl shadow-xl shadow-black/8 px-8 py-14 text-center">
@@ -398,19 +414,27 @@ function DiscoverMode({
         <Sparkles size={26} className="text-violet-400" strokeWidth={1.6} />
       </div>
       <h2 className="font-heading text-xl font-bold text-text mb-3">
-        You've discovered all current recommendations!
+        {error ? "Could not load new words" : "No new words right now"}
       </h2>
       <p className="text-sm font-body text-text/55 leading-relaxed mb-8">
-        Now is a great time to do some <span className="font-semibold text-primary">Readings</span> to
-        see these words in context and practice what you've learned.
+        {error ?? "Try again in a moment, or read a text to meet new words in context."}
       </p>
-      <button
-        type="button"
-        onClick={() => onNavigate("/reading")}
-        className="rounded-xl bg-primary text-white px-5 py-2.5 text-sm font-heading font-semibold hover:opacity-90"
-      >
-        Go to Reading 📖
-      </button>
+      <div className="flex gap-3 justify-center">
+        <button
+          type="button"
+          onClick={onRetry}
+          className="inline-flex items-center gap-2 rounded-xl border border-black/12 px-5 py-2.5 text-sm font-heading font-semibold text-text hover:bg-black/[0.03]"
+        >
+          <RefreshCw size={14} /> Try again
+        </button>
+        <button
+          type="button"
+          onClick={() => onNavigate("/reading")}
+          className="rounded-xl bg-primary text-white px-5 py-2.5 text-sm font-heading font-semibold hover:opacity-90"
+        >
+          Go to Reading
+        </button>
+      </div>
     </div>
   );
 
@@ -420,7 +444,7 @@ function DiscoverMode({
     <div className="max-w-md mx-auto">
       <div className="flex justify-between text-xs font-body text-text/50 mb-4">
         <span className="flex items-center gap-1.5"><Sparkles size={12} /> Discover mode</span>
-        <span>{cards.length} words left</span>
+        <span>{cards.length} words ready{loading ? " · loading more" : ""}</span>
       </div>
 
       <AnimatePresence mode="wait">
@@ -435,19 +459,22 @@ function DiscoverMode({
             <div className="inline-flex items-center justify-center w-12 h-12 rounded-xl bg-violet-50 text-violet-600 mb-4">
               <Sparkles size={22} />
             </div>
-            {card.cefrLevel && (
-              <span className="inline-block mb-2 text-[10px] font-heading font-semibold uppercase tracking-widest px-2 py-0.5 rounded-full bg-violet-50 text-violet-600">
-                {card.cefrLevel}
-              </span>
-            )}
+            <div className="flex items-center justify-center gap-1.5 mb-2">
+              {card.cefrLevel && (
+                <span className="inline-block text-[10px] font-heading font-semibold uppercase tracking-widest px-2 py-0.5 rounded-full bg-violet-50 text-violet-600">
+                  {card.cefrLevel}
+                </span>
+              )}
+              {card.lookupCount > 0 && (
+                <span className="inline-block text-[10px] font-heading font-semibold uppercase tracking-widest px-2 py-0.5 rounded-full bg-amber-50 text-amber-700">
+                  You looked this up
+                </span>
+              )}
+            </div>
             <p className="text-xs font-body font-semibold text-text/40 uppercase tracking-widest mb-1">New word</p>
             <div className="flex items-center justify-center gap-2">
               <h2 className="font-heading text-3xl font-bold text-text">{card.dutch}</h2>
-              <SpeakButton
-                text={card.dutch}
-                label={`Play pronunciation for ${card.dutch}`}
-                className="h-9 w-9 shrink-0"
-              />
+              <SpeakButton text={card.dutch} label={`Play pronunciation for ${card.dutch}`} className="h-9 w-9 shrink-0" />
             </div>
           </div>
 
@@ -491,20 +518,28 @@ function DiscoverMode({
   );
 }
 
-function EmptyReview({ onHome }: { onHome: () => void }) {
+function EmptyReview({ onHome, onDiscover, learningTotal }: { onHome: () => void; onDiscover: () => void; learningTotal: number }) {
   return (
     <div className="max-w-md mx-auto bg-white rounded-2xl shadow-xl shadow-black/8 px-8 py-14 text-center">
       <div className="mb-4 flex h-14 w-14 items-center justify-center rounded-2xl bg-emerald-50 mx-auto">
         <Check size={28} className="text-emerald-500" strokeWidth={1.8} />
       </div>
-      <h2 className="font-heading text-xl font-bold text-text mb-2">No words due today</h2>
+      <h2 className="font-heading text-xl font-bold text-text mb-2">No words due right now</h2>
       <p className="text-sm font-body text-text/50 mb-8">
-        You do not have any words to review yet. Add words from readings or switch to Discover mode.
+        {learningTotal > 0
+          ? `You have ${learningTotal} word${learningTotal === 1 ? "" : "s"} in your queue; they will come back when they are due.`
+          : "Add words from readings or Discover mode and they will show up here."}
       </p>
-      <button type="button" onClick={onHome}
-        className="rounded-xl border border-black/12 px-5 py-2.5 text-sm font-heading font-semibold text-text hover:bg-black/[0.03]">
-        Back home
-      </button>
+      <div className="flex gap-3 justify-center">
+        <button type="button" onClick={onDiscover}
+          className="inline-flex items-center gap-2 rounded-xl bg-violet-600 text-white px-5 py-2.5 text-sm font-heading font-semibold hover:opacity-90">
+          <Sparkles size={14} /> Discover words
+        </button>
+        <button type="button" onClick={onHome}
+          className="rounded-xl border border-black/12 px-5 py-2.5 text-sm font-heading font-semibold text-text hover:bg-black/[0.03]">
+          Back home
+        </button>
+      </div>
     </div>
   );
 }

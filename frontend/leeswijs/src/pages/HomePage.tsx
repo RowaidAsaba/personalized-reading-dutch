@@ -41,9 +41,7 @@ export default function HomePage() {
     if (!user) return;
     setLoading(true);
     apiClient
-      .get<DashboardStats>("/users/me/dashboard-stats", {
-        headers: { "X-User-Id": user.id },
-      })
+      .get<DashboardStats>("/users/me/dashboard-stats")
       .then((r) => setStats(r.data))
       .catch(() => setStats(null))
       .finally(() => setLoading(false));
@@ -105,8 +103,8 @@ function Dashboard({
       <NextActionBanner stats={stats} onNavigate={onNavigate} />
 
       <div className="grid grid-cols-1 sm:grid-cols-2 gap-5">
-        <CefrCard level={stats.cefr_level} />
-        <AcquisitionCard score={stats.acquisition_score} />
+        <CefrCard level={stats.cefr_level} effective={stats.effective_cefr} />
+        <AcquisitionCard score={stats.acquisition_score} known={stats.total_known} goal={stats.words_known_goal} />
       </div>
 
       <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
@@ -147,19 +145,19 @@ function NextActionBanner({
   onNavigate: (path: string) => void;
 }) {
   const hasReviews = stats.to_review > 0;
-  const readingsRemaining = Math.max(0, stats.readings_total - stats.readings_completed);
+  const inProgress = Math.max(0, stats.readings_total - stats.readings_completed);
   const target = hasReviews ? "/flashcards" : "/reading";
   const title = hasReviews
     ? "Review words due today"
-    : readingsRemaining > 0
-      ? "Continue the reading study"
-      : "Study tasks complete";
+    : inProgress > 0
+      ? "Continue your reading"
+      : "Start a new reading";
   const body = hasReviews
-    ? `${stats.to_review} words are ready for review before your next reading task.`
-    : readingsRemaining > 0
-      ? `${readingsRemaining} reading task${readingsRemaining === 1 ? "" : "s"} left in the study flow.`
-      : "Your reading tasks are complete. Return when your vocabulary check is available.";
-  const button = hasReviews ? "Open flashcards" : readingsRemaining > 0 ? "Open reading" : "View progress";
+    ? `${stats.to_review} word${stats.to_review === 1 ? " is" : "s are"} ready for review before your next text.`
+    : inProgress > 0
+      ? `You have ${inProgress} reading${inProgress === 1 ? "" : "s"} in progress. Pick up where you left off.`
+      : "A new text at your level, about the things you care about, is one tap away.";
+  const button = hasReviews ? "Open flashcards" : inProgress > 0 ? "Open reading" : "New reading";
 
   return (
     <div className="rounded-2xl border border-primary/15 bg-primary/[0.04] px-5 py-4 shadow-sm shadow-black/5">
@@ -193,8 +191,9 @@ const CEFR_META: Record<string, { color: string; label: string }> = {
   "—": { color: "#9CA3AF", label: "Not assessed yet" },
 };
 
-function CefrCard({ level }: { level: string }) {
+function CefrCard({ level, effective }: { level: string; effective: string | null }) {
   const meta = CEFR_META[level] ?? CEFR_META["—"];
+  const shifted = effective && effective !== level;
   return (
     <Card>
       <p className="text-xs font-body font-semibold uppercase tracking-wide text-text/40 mb-3">
@@ -216,7 +215,7 @@ function CefrCard({ level }: { level: string }) {
             className="mt-3 inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 text-xs font-heading font-semibold"
             style={{ backgroundColor: `${meta.color}18`, color: meta.color }}
           >
-            <Sparkles size={11} /> Active level
+            <Sparkles size={11} /> {shifted ? `Texts at ${effective}` : "Active level"}
           </div>
         </div>
       </div>
@@ -224,14 +223,14 @@ function CefrCard({ level }: { level: string }) {
   );
 }
 
-function AcquisitionCard({ score }: { score: number }) {
+function AcquisitionCard({ score, known, goal }: { score: number; known: number; goal: number }) {
   const pct = Math.min(100, Math.max(0, Math.round(score)));
   const ringData = [{ value: pct }, { value: 100 - pct }];
 
   return (
     <Card>
       <p className="text-xs font-body font-semibold uppercase tracking-wide text-text/40 mb-3">
-        Vocabulary Acquisition
+        Words known
       </p>
       <div className="flex items-center gap-5">
         <div className="relative h-24 w-24 shrink-0">
@@ -257,9 +256,9 @@ function AcquisitionCard({ score }: { score: number }) {
           </div>
         </div>
         <div>
-          <p className="font-heading text-xl font-bold text-text">{pct}%</p>
+          <p className="font-heading text-xl font-bold text-text">{known.toLocaleString()}</p>
           <p className="text-xs font-body text-text/50 mt-1">
-            of your current level's vocabulary mastered
+            of your {goal.toLocaleString()}-word goal
           </p>
           <div className="mt-3 h-1.5 rounded-full bg-black/8 w-32">
             <motion.div
@@ -452,7 +451,7 @@ function NewJourneyBanner({ onStart }: { onStart: () => void }) {
           Your dashboard is getting ready 🚀
         </h2>
         <p className="text-sm font-body text-white/80 max-w-md mb-6">
-          Complete your first reading and vocabulary session to see your personalized analytics here — CEFR progress, word acquisition, and engagement stats.
+          Finish your first reading and review a few words to see your progress here: level, words known, and reading time.
         </p>
         <button
           type="button"

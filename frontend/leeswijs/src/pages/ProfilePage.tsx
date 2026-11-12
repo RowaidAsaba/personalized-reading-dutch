@@ -4,6 +4,7 @@ import {
   Award,
   BookOpen,
   LogOut,
+  Mail,
   RefreshCw,
   Settings as SettingsIcon,
   Tags,
@@ -30,6 +31,12 @@ export default function ProfilePage() {
     navigate("/login", { replace: true });
   }
 
+  const offset = user.difficultyOffset;
+  const levelNote =
+    offset === 0
+      ? "Your assessed level."
+      : `Assessed ${user.cefrLevel ?? "—"}, texts currently ${offset > 0 ? "one step harder" : "one step easier"} based on your feedback.`;
+
   return (
     <motion.div
       initial={{ opacity: 0, y: 14 }}
@@ -43,10 +50,8 @@ export default function ProfilePage() {
             <UserIcon size={17} />
           </div>
           <div>
-            <h1 className="font-heading text-2xl font-bold text-text">Profile</h1>
-            <p className="text-sm font-body text-text/50">
-              Your study setup for this prototype.
-            </p>
+            <h1 className="font-heading text-2xl font-bold text-text">{user.name}</h1>
+            <p className="text-sm font-body text-text/50">What LeesWijs knows about you.</p>
           </div>
         </div>
         <button
@@ -61,32 +66,26 @@ export default function ProfilePage() {
 
       <section className="rounded-lg border border-black/8 bg-white px-5 py-5 shadow-sm shadow-black/5">
         <div className="grid gap-4 sm:grid-cols-2">
-          <InfoBlock
-            icon={<UserIcon size={14} />}
-            label="Account ID"
-            value={user.id}
-          />
+          <InfoBlock icon={<Mail size={14} />} label="Email" value={user.email} />
           <InfoBlock
             icon={<Award size={14} />}
-            label="CEFR level"
-            value={user.cefrLevel ?? "Not assessed"}
+            label="Reading level"
+            value={user.effectiveCefr ?? user.cefrLevel ?? "Not assessed"}
+            hint={levelNote}
           />
         </div>
 
         <div className="mt-5 border-t border-black/8 pt-4">
           <div className="mb-2 flex items-center gap-1.5 text-xs font-body font-semibold uppercase tracking-wide text-text/50">
             <Tags size={13} />
-            Topics
+            Interests
           </div>
           <div className="flex flex-wrap gap-1.5">
             {user.interests.length === 0 ? (
-              <span className="text-sm font-body text-text/45">No topics selected.</span>
+              <span className="text-sm font-body text-text/45">No interests selected.</span>
             ) : (
               user.interests.map((id) => (
-                <span
-                  key={id}
-                  className="rounded-full bg-primary/10 px-2.5 py-1 text-xs font-body font-semibold text-primary"
-                >
+                <span key={id} className="rounded-full bg-primary/10 px-2.5 py-1 text-xs font-body font-semibold text-primary">
                   {interestLabel(id)}
                 </span>
               ))
@@ -96,20 +95,18 @@ export default function ProfilePage() {
       </section>
 
       <section className="rounded-lg border border-black/8 bg-white px-5 py-5 shadow-sm shadow-black/5">
-        <h2 className="font-heading text-sm font-bold text-text">
-          Study actions
-        </h2>
+        <h2 className="font-heading text-sm font-bold text-text">Quick actions</h2>
         <div className="mt-4 grid gap-2 sm:grid-cols-2">
           <ActionButton
             icon={<BookOpen size={15} />}
             label="Start reading"
             hint="Generate a new Dutch text"
-            onClick={() => navigate("/home")}
+            onClick={() => navigate("/reading")}
           />
           <ActionButton
             icon={<RefreshCw size={15} />}
-            label="Retake assessment"
-            hint="Update the CEFR estimate"
+            label="Retake the word check"
+            hint="Re-estimate your level"
             onClick={() => navigate("/onboarding?step=assessment")}
           />
         </div>
@@ -127,14 +124,11 @@ export default function ProfilePage() {
   );
 }
 
-function InfoBlock({
-  icon,
-  label,
-  value,
-}: {
+function InfoBlock({ icon, label, value, hint }: {
   icon: React.ReactNode;
   label: string;
   value: string;
+  hint?: string;
 }) {
   return (
     <div className="rounded-lg border border-black/8 bg-black/[0.015] px-4 py-3">
@@ -142,17 +136,13 @@ function InfoBlock({
         <span>{icon}</span>
         {label}
       </div>
-      <p className="mt-2 font-heading text-lg font-semibold text-text">{value}</p>
+      <p className="mt-2 font-heading text-lg font-semibold text-text break-all">{value}</p>
+      {hint && <p className="mt-1 text-xs font-body text-text/45">{hint}</p>}
     </div>
   );
 }
 
-function ActionButton({
-  icon,
-  label,
-  hint,
-  onClick,
-}: {
+function ActionButton({ icon, label, hint, onClick }: {
   icon: React.ReactNode;
   label: string;
   hint: string;
@@ -168,12 +158,8 @@ function ActionButton({
         {icon}
       </span>
       <span>
-        <span className="block font-heading text-sm font-semibold text-text">
-          {label}
-        </span>
-        <span className="mt-0.5 block text-xs font-body text-text/45">
-          {hint}
-        </span>
+        <span className="block font-heading text-sm font-semibold text-text">{label}</span>
+        <span className="mt-0.5 block text-xs font-body text-text/45">{hint}</span>
       </span>
     </button>
   );
