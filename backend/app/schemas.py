@@ -1,120 +1,133 @@
 from __future__ import annotations
-from typing import Any, Literal, Optional, List
-from pydantic import AliasChoices, BaseModel, Field, field_validator
-from app.models import IntentTagType
 
-LikertScale = Literal[1, 2, 3, 4, 5]
-TLXScale = Literal[1, 2, 3, 4, 5, 6, 7]
+import re
+from typing import Any, Literal, Optional
+
+from pydantic import BaseModel, Field, field_validator
+
+from app.models import GENDER_VALUES
+
+_EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+Rating = Literal[1, 2, 3, 4, 5]
+
+
+def normalise_email(value: str) -> str:
+    email = value.strip().lower()
+    if not _EMAIL_RE.match(email):
+        raise ValueError("Enter a valid email address.")
+    return email
+
+
+# ---------------------------------------------------------------- auth
 
 class RegisterRequest(BaseModel):
     email: str
-    password: str
-    display_name: Optional[str] = None
-    study_code: Optional[str] = None
-    start_condition: Optional[str] = None
+    password: str = Field(min_length=8, max_length=128)
+    display_name: Optional[str] = Field(default=None, max_length=255)
+
+    @field_validator("email")
+    @classmethod
+    def _email(cls, value: str) -> str:
+        return normalise_email(value)
+
 
 class LoginRequest(BaseModel):
     email: str
     password: str
 
-class AuthResponse(BaseModel):
-    user_id: str
+    @field_validator("email")
+    @classmethod
+    def _email(cls, value: str) -> str:
+        return normalise_email(value)
+
+
+class GoogleAuthRequest(BaseModel):
+    credential: str
+
+
+class UserOut(BaseModel):
+    id: str
     email: str
     display_name: Optional[str] = None
+    interests: list[str] = []
     estimated_cefr: Optional[str] = None
+    effective_cefr: Optional[str] = None
+    difficulty_offset: int = 0
     onboarding_completed: bool = False
-    has_switched_conditions: bool = False
+    has_password: bool = False
+    has_google: bool = False
+    age: Optional[int] = None
+    city: Optional[str] = None
+    gender: Optional[str] = None
+    job: Optional[str] = None
+    academic_background: Optional[str] = None
+    mother_language: Optional[str] = None
+    other_languages: Optional[str] = None
+    purpose: Optional[str] = None
+    created_at: Optional[str] = None
 
-class SurveyResponse(BaseModel):
-    session_id: int = Field(alias="sessionId")
 
-    worth_my_time: LikertScale = Field(alias="worthMyTime")
-    appropriate_challenge: LikertScale = Field(alias="appropriateChallenge", default=3)
-    comprehension: LikertScale = Field(alias="comprehension", default=3)
-    focused_attention: LikertScale = Field(alias="focusedAttention")
-    reward: LikertScale = Field(alias="reward")
-    perceived_relevance: LikertScale = Field(alias="perceivedRelevance")
-    mental_effort: TLXScale = Field(alias="mentalEffort")
-    perceived_personalization: LikertScale = Field(alias="perceivedPersonalization")
-    duration_seconds: Optional[int] = None
+class AuthResponse(BaseModel):
+    access_token: str
+    token_type: str = "bearer"
+    user: UserOut
 
-    model_config = {"populate_by_name": True}
 
-class GenerateSessionRequest(BaseModel):
-    user_id: str
-    k: float = Field(default=0.7, validation_alias=AliasChoices("k", "K"))
-    narrative_style: str = "Informative Educational Semi-Narrative Article"
-    word_count_range: str = "150-200"
+# ---------------------------------------------------------------- profile
 
-    model_config = {"populate_by_name": True}
+class ProfileUpdateRequest(BaseModel):
+    display_name: Optional[str] = Field(default=None, max_length=255)
+    age: Optional[int] = Field(default=None, ge=5, le=120)
+    city: Optional[str] = Field(default=None, max_length=255)
+    gender: Optional[str] = None
+    job: Optional[str] = Field(default=None, max_length=255)
+    academic_background: Optional[str] = Field(default=None, max_length=255)
+    mother_language: Optional[str] = Field(default=None, max_length=100)
+    other_languages: Optional[str] = Field(default=None, max_length=255)
+    purpose: Optional[str] = Field(default=None, max_length=100)
+    interests: Optional[list[str]] = None
+    estimated_cefr: Optional[str] = None
+    difficulty_offset: Optional[int] = Field(default=None, ge=-1, le=1)
 
-class WordInfo(BaseModel):
-    word_id: int
-    word: str
-    translation: str
-    cefr_level: str
-
-class SessionSummary(BaseModel):
-    session_id: int
-    user_id: str
-    title: str
-    topic_used: Optional[str] = None
-    reading_number: int
-    survey_completed: bool
-
-class TextToken(BaseModel):
-    text: str
-    type: Literal["word", "punctuation", "space"]
-    status: Optional[Literal["new", "learning", "known"]] = None
-    word_id: Optional[int] = None
-
-class GenerateSessionResponse(BaseModel):
-    session_id: int
-    title: str
-    content: str
-    tokens: list[TextToken] = []
-    topic_used: Optional[str] = None
-    blue_words: list[WordInfo]
-    yellow_words: list[WordInfo]
-    word_translations: dict[str, str]
-    metadata: dict[str, Any]
-    reading_number: int
-    cefr_level: Optional[str] = None
-
-class SessionDetailResponse(BaseModel):
-    session_id: int
-    title: str
-    content: str
-    tokens: list[TextToken] = []
-    topic_used: Optional[str] = None
-    reading_number: int
-    survey_completed: bool
-    blue_words: list[WordInfo]
-    yellow_words: list[WordInfo]
-    word_translations: dict[str, str]
-
-class LogTelemetryRequest(BaseModel):
-    session_id: int
-    word_id: int
-    intent_tag: IntentTagType
-    engagement_weight: int
-
-    @field_validator("intent_tag", mode="before")
+    @field_validator("gender")
     @classmethod
-    def normalize_intent_tag(cls, value):
-        if isinstance(value, str):
-            return value.strip().replace("-", "_").upper()
+    def _gender(cls, value: Optional[str]) -> Optional[str]:
+        if value is None or value == "":
+            return value
+        if value not in GENDER_VALUES:
+            raise ValueError("Unknown gender value.")
         return value
 
-class LogTelemetryResponse(BaseModel):
-    log_id: int
-    message: str
+    @field_validator("estimated_cefr")
+    @classmethod
+    def _cefr(cls, value: Optional[str]) -> Optional[str]:
+        if value is None:
+            return None
+        value = value.upper()
+        if value not in {"A1", "A2", "B1", "B2", "C1", "C2"}:
+            raise ValueError("Unknown CEFR level.")
+        return value
 
-class AddToLearnRequest(BaseModel):
-    user_id: str
-    word_id: int
-    review_interval_days: Optional[int] = None
-    force: bool = False
+
+# ---------------------------------------------------------------- assessment (onboarding word check)
+
+class AssessmentBatchRequest(BaseModel):
+    batch_number: int = Field(default=1, ge=1, le=2)
+    self_reported_cefr: str = "B1"
+    known_words: list[str] = []
+    all_words: list[str] = []
+
+
+class AssessmentSubmitRequest(BaseModel):
+    batch_number: int
+    known_word_ids: list[str]
+    all_word_ids: list[str]
+    estimated_level: str
+    confidence_score: float
+    is_final: bool = False
+
+
+# ---------------------------------------------------------------- lexicon / words
 
 class LexiconEntry(BaseModel):
     word_id: int
@@ -126,60 +139,74 @@ class LexiconEntry(BaseModel):
 
     model_config = {"from_attributes": True}
 
-class KRSRunResponse(BaseModel):
-    user_id: str
-    words_recommended: int
-    words_matched: int
-    new_entries_saved: int
 
-class AssessmentBatchResponse(BaseModel):
-    batch_number: int
-    total_batches: int
-    words: list[dict]
+class WordInfo(BaseModel):
+    word_id: int
+    word: str
+    translation: str
+    cefr_level: str
+    examples: Optional[Any] = None
 
-class AssessmentSubmitRequest(BaseModel):
-    user_id: str
-    batch_number: int
-    known_word_ids: list[str]
-    all_word_ids: list[str]
-    estimated_level: str
-    confidence_score: float
-    is_final: bool = False
 
-class OnboardingPersonalInfoRequest(BaseModel):
-    user_id: str
-    display_name: Optional[str] = None
-    age: Optional[int] = None
-    city: Optional[str] = None
-    job: Optional[str] = None
-    academic_background: Optional[str] = None
-    mother_language: Optional[str] = None
-    other_languages: Optional[str] = None
-    purpose: Optional[str] = None
-    self_reported_cefr: Optional[str] = None
+class TextToken(BaseModel):
+    text: str
+    type: Literal["word", "punctuation", "space"]
+    status: Optional[Literal["new", "learning", "known"]] = None
+    word_id: Optional[int] = None
 
-class OnboardingWordsResponse(BaseModel):
-    words: list[LexiconEntry]
 
-class ProfileUpdateRequest(BaseModel):
-    display_name: Optional[str] = None
-    age: Optional[int] = None
-    city: Optional[str] = None
-    job: Optional[str] = None
-    academic_background: Optional[str] = None
-    mother_language: Optional[str] = None
-    other_languages: Optional[str] = None
-    purpose: Optional[str] = None
-    interests: Optional[list[str]] = None
-    estimated_cefr: Optional[str] = None
-    assessed_at: Optional[str] = None
+# ---------------------------------------------------------------- reading sessions
 
-class VocabTestSubmitRequest(BaseModel):
-    user_id: str
-    session_group_id: int
-    answers: list[dict]
-    score: int
-    submitted_at: str
-    study_phase: int = 1
-    test_type: str = "immediate"
-    is_final: bool = False
+class GenerateSessionRequest(BaseModel):
+    word_count_range: str = "150-200"
+
+
+class SessionResponse(BaseModel):
+    session_id: int
+    title: str
+    content: str
+    tokens: list[TextToken] = []
+    topic_used: Optional[str] = None
+    reading_number: int
+    cefr_level: Optional[str] = None
+    ended: bool = False
+    ended_at: Optional[str] = None
+    continuation_count: int = 0
+    blue_words: list[WordInfo] = []
+    yellow_words: list[WordInfo] = []
+    word_translations: dict[str, str] = {}
+    metadata: dict[str, Any] = {}
+
+
+class ReadingFeedbackRequest(BaseModel):
+    difficulty: Rating   # 1 too easy .. 3 normal .. 5 too difficult
+    interest: Rating
+    relevance: Rating
+    worth_time: Rating
+
+
+class EndSessionRequest(BaseModel):
+    duration_seconds: Optional[int] = Field(default=None, ge=0)
+    feedback: Optional[ReadingFeedbackRequest] = None
+
+
+# ---------------------------------------------------------------- vocabulary vector
+
+class WordIdRequest(BaseModel):
+    word_id: int
+
+
+class ReviewRequest(BaseModel):
+    word_id: int
+    remembered: bool
+    interval_days: Optional[int] = Field(default=None, ge=0, le=365)
+
+
+class AddToLearnRequest(BaseModel):
+    word_id: int
+    interval_days: int = Field(default=1, ge=0, le=365)
+
+
+class LookupRequest(BaseModel):
+    word_id: int
+    session_id: Optional[int] = None
