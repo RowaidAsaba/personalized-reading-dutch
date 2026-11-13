@@ -12,6 +12,7 @@ from app.adaptation import build_adaptation
 from app.krs_service import SOURCE_GEMINI, ensure_reservoir, reservoir_rows
 from app.models import (
     Lexicon,
+    ReadingFeedback,
     ReadingSession,
     RecommendedVocabulary,
     TopicStatus,
@@ -38,34 +39,58 @@ _NEUTRAL_POOL = [
     "voedsel", "media", "geschiedenis", "steden", "onderwijs",
 ]
 
-_FIXED_STYLE = "Informative Educational Semi-Narrative Article"
+# Rotating text styles: key -> (name shown in the prompt, one-line guide).
+STYLES: dict[str, tuple[str, str]] = {
+    "short_story": (
+        "Short story",
+        "A character wants something, meets an obstacle, and it resolves.",
+    ),
+    "mystery_explainer": (
+        "Mystery explainer",
+        "Open with a strange fact or puzzle, then reveal the explanation step by step.",
+    ),
+    "true_profile": (
+        "True profile",
+        "The real story of a person, place or invention, told as a story.",
+    ),
+    "scene": (
+        "Scene",
+        "One vivid moment in a place, seen through someone's eyes.",
+    ),
+    "day_in_the_life": (
+        "Day in the life",
+        "Someone's day in a job or place connected to the topic.",
+    ),
+    "interview": (
+        "Interview",
+        "A short Q&A with a (fictional) expert or character.",
+    ),
+}
+STYLE_ROTATION_WINDOW = 2       # never repeat the style of the last N texts
+STYLE_LOW_INTEREST = 2          # last feedback with interest <= this also blocks that text's style
 
 _SYSTEM_INSTRUCTION = """\
-You are an expert Dutch Pedagogical Content Creator specialising in L2 educational reading.
-Your target style is: Personalized Informative Exploration — halfway between National Geographic
-(simplified) and a CEFR reading comprehension passage.
+You are an expert Dutch writer for second-language learners. You write short texts that people
+read for pleasure: stories, scenes, profiles, interviews and explainers that start with a hook,
+follow one thread and end well. You are not a textbook and not an encyclopedia.
 
-Your writing must adhere to five strict pillars:
+Your writing must adhere to four strict pillars:
 
 1. CEFR Alignment: Follow the specified CEFR level's grammar and sentence length strictly.
+   Apart from the target words, the reader must be able to read without stopping.
 
-2. Educational Article Style: Write like an informative Dutch magazine or cultural-explainer
-   article. Prefer events, discoveries, named places, real organizations, and factual
-   explanations over fiction, diary entries, or emotional reflection.
+2. Enjoyment: concrete scenes, people with stakes, specific names, numbers and objects,
+   one surprise, and a satisfying ending. No lecturing, no moralising, no filler.
 
-3. Informational Density: Every paragraph must teach something concrete and specific.
-   Include real statistics, named locations, studies, comparisons, rankings, cultural
-   facts, historical context, or expert examples. Generic statements like 'movement is
-   healthy' are NOT acceptable unless immediately followed by a real number, study, or
-   concrete example. Write like a journalist, not like a brochure.
+3. Truth: invented characters and scenes are fine, but every fact around them must be
+   accurate. Never invent statistics, studies, places or historical claims.
 
-4. Subtle Personalisation: Let the learner's interests and location INSPIRE the specific
-   angle — a sports fan gets cycling statistics, a tech fan gets AI examples, a traveller
-   gets cultural comparisons. Do NOT make the article 'about' the learner.
-   The reader thinks: 'this topic fits my world', not 'this text is about me'.
+4. Subtle Personalisation: Let the learner's traits INSPIRE the angle, setting or examples.
+   Do NOT write the text 'about' the learner.
+   The reader thinks: 'this fits my world', not 'this text is about me'.
 
-5. Lexical Injection: Weave every Target Word naturally into an informative, contextual
-   sentence. Vocabulary must feel integral to the facts, not bolted on.
+Lexical Injection: Weave every Target Word naturally into a sentence whose context helps the
+reader guess its meaning. The words must serve the story, not interrupt it.
 
 Formatting Rule: Every time you use a word from the provided Target Lists,
 you MUST wrap it in double brackets, like this: [[woord]]. Do NOT wrap any other words in brackets.\
@@ -194,6 +219,41 @@ def _recent_topics(user_id: str, db: Session) -> list[str]:
     return [topic for (topic,) in rows if topic]
 
 
+def _recent_styles(user_id: str, db: Session, limit: int) -> list[str | None]:
+    rows = (
+        db.query(ReadingSession.narrative_style)
+        .filter(ReadingSession.user_id == user_id)
+        .order_by(ReadingSession.session_id.desc())
+        .limit(limit)
+        .all()
+    )
+    return [style for (style,) in rows]
+
+
+def choose_style(user_id: str, db: Session) -> str:
+    """Rotate styles: never the style of the last two texts, and not the style of the
+    last text if its feedback said it was not interesting."""
+    blocked = {style for style in _recent_styles(user_id, db, STYLE_ROTATION_WINDOW) if style}
+    last = (
+        db.query(ReadingSession, ReadingFeedback)
+        .join(ReadingFeedback, ReadingFeedback.session_id == ReadingSession.session_id)
+        .filter(ReadingSession.user_id == user_id)
+        .order_by(ReadingFeedback.created_at.desc(), ReadingFeedback.id.desc())
+        .first()
+    )
+    if last is not None:
+        session, feedback = last
+        if feedback.interest <= STYLE_LOW_INTEREST and session.narrative_style:
+            blocked.add(session.narrative_style)
+    candidates = [key for key in STYLES if key not in blocked] or list(STYLES)
+    return random.choice(candidates)
+
+
+def _style_lines(style_key: str | None) -> tuple[str, str]:
+    name, guide = STYLES.get(style_key or "", STYLES["short_story"])
+    return name, guide
+
+
 def _weighted_choice(rows: list[UserTopic]) -> str:
     weights = [max(0.05, row.score or 1.0) for row in rows]
     return random.choices([row.topic_name for row in rows], weights=weights, k=1)[0]
@@ -316,35 +376,18 @@ def _length_and_difficulty(cefr: str, adapt: dict, word_count_range: str, contin
 def _info_block(cefr: str, continuation: bool) -> str:
     if _is_basic_level(cefr):
         return (
-            "### INFORMATIONAL DENSITY\n"
-            "For A1/A2, prioritize a logical, cohesive, and simple text about daily life or basic facts over "
-            "dense journalistic statistics. Keep it grounded in reality.\n"
+            "- For A1/A2: one simple, concrete situation from daily life, told in short clear steps. "
+            "Grounded in reality, no statistics needed."
         )
     if continuation:
-        return """\
-### INFORMATIONAL RICHNESS — MANDATORY
-This continuation MUST introduce at least TWO new concrete data points not in the summary above.
-Choose from: a real statistic, a named location or organization, a comparison between countries or eras,
-a surprising fact, a scientific finding or historical date.
-"""
-    return """\
-### INFORMATIONAL RICHNESS — MANDATORY
-The article MUST contain at least THREE of the following:
-  a) A real statistic or number
-  b) A named real-world location, organization, institution, or event
-  c) A comparison between countries, cities, cultures, or time periods
-  d) A surprising or counterintuitive fact
-  e) A specific historical date, scientific finding, or expert discovery
-  f) A concrete real-world case study or example
-Do NOT write vague generalities. Every claim should feel grounded and specific.
-
-### PARAGRAPH STRUCTURE — MANDATORY PROGRESSION
-  §1 Hook     — open with a concrete fact, surprising statistic, or vivid specific example.
-  §2 Depth    — explain one key aspect with real grounding (number, named place, study).
-  §3 Expand   — add a comparison, cultural angle, or contrasting perspective.
-  §4 Implication (if word count allows) — consequence, trend, or practical application.
-NEVER repeat the same idea twice, even with different wording.
-"""
+        return (
+            "- Ground this part in at least ONE new true, specific detail (a real place, name, number or date) "
+            "that was not in the earlier parts."
+        )
+    return (
+        "- Ground the text in at least TWO true, specific details (a real place, name, number or date). "
+        "They should feel like part of the story, not like a fact box."
+    )
 
 
 _TARGET_WORD_RULE = (
@@ -363,6 +406,8 @@ def generate_session(user: User, db: Session, word_count_range: str = "150-200")
 
     topic = choose_topic(user.user_id, db, interest_only=bool(adapt.get("interest_boost")))
     recent_topics = _recent_topics(user.user_id, db)
+    style_key = choose_style(user.user_id, db)
+    style, style_guide = _style_lines(style_key)
 
     blue_count = {1: 3, 2: 2, 5: 1}.get(adapt.get("difficulty", 3), random.randint(1, MAX_BLUE_WORDS_DEFAULT))
     blue_entries = _pick_blue_words(user.user_id, blue_count, db)
@@ -376,49 +421,56 @@ def generate_session(user: User, db: Session, word_count_range: str = "150-200")
 
     prompt = f"""\
 ### GENERATION TASK
-Write a Personalized Informative Exploration article in Dutch.
-Target: National Geographic (simplified) × CEFR reading passage × educational travel magazine.
-NOT a generic health-tip listicle. NOT a personal diary. NOT vague Wikipedia prose.
+Write a short Dutch text that a learner will ENJOY reading: something they would read even if it were not for practice.
+Style for this text: {style}
+{style_guide}
 
 ### LEARNER PROFILE SPOTLIGHT
-To subtly inspire the angle of the article, focus on these specific traits of the learner:
+These traits should inspire the angle, setting or examples, not the subject:
 {_spotlight_block(user)}
-
-CRITICAL PERSONALISATION RULES:
-1. Use the traits above to inspire the specific angle, examples, or comparisons in the text.
-2. Do NOT write the article *about* the learner. The reader should think, "This topic fits my world."
-3. If a Location is provided, use it only as a brief comparison point. The text must explore the wider world.
+- The reader should think "this fits my world", never "this is about me".
+- Use a Location at most once, as a small setting detail or comparison.
 
 ### TOPIC
 {topic}
-
-### TOPIC DIVERSITY (avoid these recently covered topics and their close subtopics)
-Recently used: {", ".join(recent_topics) if recent_topics else "(none)"}
+Recently used (avoid these and close subtopics): {", ".join(recent_topics) if recent_topics else "(none)"}
 {_perspective_block(user)}
-### MANDATORY VOCABULARY
-1. BLUE WORDS (new): You MUST include EVERY single word from this list at least once. Wrap each in [[word]]. List: {", ".join(w["word"] for w in blue_words) or "(none)"}
-2. YELLOW WORDS (reinforce): You MUST include EVERY single word from this list at least once. Wrap each in [[word]]. List: {", ".join(w["word"] for w in yellow_words) or "(none)"}
 
-CRITICAL RULE: The text MUST flow logically. Build a single, cohesive explanation that naturally incorporates these words.
+### WHAT MAKES IT ENJOYABLE (follow all)
+1. Hook first: open with a concrete scene, a surprising fact, or a question the reader wants answered. Never open with a definition or a general statement.
+2. One clear thread: build the text around one question, problem or small journey, and pay it off by the end.
+3. People and stakes: where natural, follow a person (real or invented) who wants something or faces a problem.
+4. Concrete over abstract: specific names, numbers, places, objects, sounds. Show, don't summarise.
+5. One surprise: include at least one specific, true detail the reader probably did not know.
+6. Rhythm: mix short and medium sentences; use a line of direct speech or a question where it fits the level.
+7. Satisfying ending: close with a twist, a small insight, or a line that links back to the opening. No moral, no summary, no "Kortom".
+8. Facts must be true. Invented characters and scenes are fine, but the facts around them must be accurate.
+
+### MANDATORY VOCABULARY
+1. BLUE WORDS (new): include EVERY word at least once, wrapped in [[word]]: {", ".join(w["word"] for w in blue_words) or "(none)"}
+2. YELLOW WORDS (reinforce): include EVERY word at least once, wrapped in [[word]]: {", ".join(w["word"] for w in yellow_words) or "(none)"}
+Put each target word in a sentence where the context helps the reader guess its meaning. The words must serve the story, not interrupt it.
 {_TARGET_WORD_RULE}
+
+### LEVEL
 {adaptation_section}
 {_info_block(cefr, continuation=False)}
-### WRITING REQUIREMENTS
+- Apart from the target words, use only vocabulary and grammar the learner clearly knows at {cefr}, so they can read without stopping (aim for about 98% familiar words).
 - Length: approximately {length} Dutch words.
 - {difficulty}
-- Vocabulary: integrate [[target_words]] into factual, informative sentences where they fit naturally.
-- Do NOT address the reader directly or repeat their city/job more than once if at all.
-- Avoid: repeated phrases, thematic loops, restating the same idea, empty encouragement.
+
+### AVOID
+Encyclopedia or textbook tone, lists of tips, lecturing or moralising, giving the reader advice in "jij"-form, repeating the same idea, filler sentences, empty enthusiasm ("Dat is echt fascinerend!").
 
 ### OUTPUT SPECIFICATION
 Return ONLY valid JSON:
 {{
-  "title": "A specific, informative Dutch headline (include a number or named place if natural)",
-  "content": "The full Dutch article with [[target_words]] bracketed",
+  "title": "A short Dutch title that makes the reader curious: a question, a named person or place, or a surprising claim. No clickbait.",
+  "content": "The full Dutch text with [[target_words]] bracketed",
   "metadata": {{
     "topic_used": "{topic}",
     "cefr_actual": "{cefr}",
-    "narrative_style": "{_FIXED_STYLE}",
+    "narrative_style": "{style}",
     "injected_blue_count": 0,
     "injected_yellow_count": 0
   }}
@@ -426,8 +478,8 @@ Return ONLY valid JSON:
 """
 
     logger.info(
-        "[SessionGen] user=%s topic=%s level=%s blue=%d yellow=%d adapt=%s",
-        user.user_id, topic, cefr, len(blue_words), len(yellow_words), adapt,
+        "[SessionGen] user=%s topic=%s style=%s level=%s blue=%d yellow=%d adapt=%s",
+        user.user_id, topic, style_key, cefr, len(blue_words), len(yellow_words), adapt,
     )
     story = gemini.generate_json(prompt, system_instruction=_SYSTEM_INSTRUCTION, label="SessionGen")
     if not isinstance(story, dict) or not story.get("content"):
@@ -443,6 +495,7 @@ Return ONLY valid JSON:
         topic_used=topic,
         reading_number=reading_number,
         cefr_level_used=cefr,
+        narrative_style=style_key,
         blue_word_ids=[w["word_id"] for w in blue_words],
         yellow_word_ids=[w["word_id"] for w in yellow_words],
         looked_up_word_ids=[],
@@ -475,6 +528,7 @@ def generate_continuation(user: User, session: ReadingSession, db: Session) -> R
 
     mem: dict = session.narrative_memory or {}
     topic = session.topic_used or "Dutch everyday life"
+    style, style_guide = _style_lines(session.narrative_style)
     discourse_summary = mem.get("discourse_summary") or (session.content or "")[-600:]
     last_ending = mem.get("last_ending_context") or (session.content or "")[-300:]
     vocab_used: list[str] = mem.get("vocabulary_used", [])
@@ -485,44 +539,59 @@ def generate_continuation(user: User, session: ReadingSession, db: Session) -> R
 
     prompt = f"""\
 ### CONTINUATION TASK
-The learner has ALREADY READ the previous section of this Dutch educational article.
-Write the NEXT SECTION — advancing the article with new, concrete information.
-Do NOT restart, summarise, repeat, or rephrase anything already covered.
-The learner is at CEFR {cefr}.
+The learner has ALREADY READ the earlier parts of this Dutch text and chose "Continue the story".
+Write the NEXT PART: same style, same characters, same thread. Move it forward.
+Do NOT restart, summarise, repeat or rephrase anything already covered.
+Style of this text: {style}
+{style_guide}
 
-### WHAT HAS BEEN COVERED (do NOT repeat, rephrase, or re-explain any of this)
-**Article summary so far:**
+### WHAT CAME BEFORE (do NOT repeat or re-explain any of this)
+**Summary of the earlier parts:**
 {discourse_summary}
 
-**Last sentence / ending context (continue directly from here):**
+**Last lines (continue directly from here):**
 "{last_ending}"
 
 **Subtopics already covered:** {", ".join(mem.get("subtopics_used", [topic])) or topic}
 **Vocabulary already used:** {", ".join(vocab_used) or "(none)"}
 {_perspective_block(user)}
-### NEW VOCABULARY TO WEAVE IN (this continuation only)
-1. BLUE WORDS — wrap in [[word]]: {", ".join(w["word"] for w in blue_words) or "(none)"}
-2. YELLOW WORDS — wrap in [[word]]: {", ".join(w["word"] for w in yellow_words) or "(none)"}
 
+### WHAT MAKES IT ENJOYABLE (follow all)
+1. Pick up the thread: the same people, place and open question as before; the reader should feel the story moving.
+2. Something new happens: a development, a complication, a discovery or an answer. Not more of the same.
+3. Concrete over abstract: specific names, numbers, places, objects, sounds. Show, don't summarise.
+4. One surprise: include at least one specific, true detail the reader probably did not know.
+5. Rhythm: mix short and medium sentences; use a line of direct speech or a question where it fits the level.
+6. Ending: stop at a natural resting point that feels complete, but leave ONE small open question or loose end,
+   so continuing is tempting and stopping here also feels fine. No moral, no summary, no "Kortom".
+7. Facts must be true. Invented characters and scenes are fine, but the facts around them must be accurate.
+
+### MANDATORY VOCABULARY (this part only)
+1. BLUE WORDS (new): include EVERY word at least once, wrapped in [[word]]: {", ".join(w["word"] for w in blue_words) or "(none)"}
+2. YELLOW WORDS (reinforce): include EVERY word at least once, wrapped in [[word]]: {", ".join(w["word"] for w in yellow_words) or "(none)"}
+Put each target word in a sentence where the context helps the reader guess its meaning. The words must serve the story, not interrupt it.
 {_TARGET_WORD_RULE}
+
+### LEVEL
+The learner is at CEFR {cefr}.
 {adaptation_section}
 {_info_block(cefr, continuation=True)}
-### STRICT CONTINUATION REQUIREMENTS
-Style: Personalized Informative Exploration — factual, specific, magazine-like.
-- Continue DIRECTLY from where the article ended — no recap, no re-introduction.
-- Each paragraph must advance the topic with genuinely NEW information.
-- Length: approximately {length} Dutch words across two paragraphs.
+- Apart from the target words, use only vocabulary and grammar the learner clearly knows at {cefr}, so they can read without stopping (aim for about 98% familiar words).
+- Length: approximately {length} Dutch words.
 - {difficulty}
+
+### AVOID
+Recaps, encyclopedia or textbook tone, lists of tips, lecturing or moralising, advice in "jij"-form, repeating an idea, filler sentences, empty enthusiasm.
 
 ### OUTPUT SPECIFICATION
 Return ONLY valid JSON:
 {{
-  "title": "A short, specific informative continuation headline in Dutch",
+  "title": "A short Dutch title for this part that makes the reader curious",
   "content": "The continuation text with [[target_words]] bracketed",
   "metadata": {{
     "topic_used": "{topic}",
     "cefr_actual": "{cefr}",
-    "narrative_style": "{_FIXED_STYLE}",
+    "narrative_style": "{style}",
     "injected_blue_count": 0,
     "injected_yellow_count": 0
   }}
@@ -562,9 +631,9 @@ Return ONLY valid JSON:
 
 def _generate_summary(content: str, topic: str) -> str:
     prompt = (
-        f"Read the following Dutch educational text about '{topic}' and write a concise "
-        f"3-5 sentence summary IN ENGLISH covering: the main topic, key entities mentioned, "
-        f"key concepts explained, and how the text ended. Return ONLY the plain summary text.\n\n"
+        f"Read the following Dutch text about '{topic}' and write a concise "
+        f"3-5 sentence summary IN ENGLISH covering: the style and setting, the characters or people, "
+        f"what happens or is explained, any open question, and how the text ended. Return ONLY the plain summary text.\n\n"
         f"TEXT:\n{content[:3000]}"
     )
     try:

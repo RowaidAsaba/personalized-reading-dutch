@@ -83,6 +83,7 @@ def _to_response(session: ReadingSession, db: Session, metadata: dict | None = N
         topic_used=session.topic_used,
         reading_number=session.reading_number,
         cefr_level=session.cefr_level_used,
+        narrative_style=session.narrative_style,
         ended=session.ended_at is not None,
         ended_at=session.ended_at.isoformat() if session.ended_at else None,
         continuation_count=session.continuation_count or 0,

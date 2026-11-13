@@ -169,6 +169,7 @@ class SessionResponse(BaseModel):
     topic_used: Optional[str] = None
     reading_number: int
     cefr_level: Optional[str] = None
+    narrative_style: Optional[str] = None
     ended: bool = False
     ended_at: Optional[str] = None
     continuation_count: int = 0
@@ -200,6 +201,7 @@ class ReviewRequest(BaseModel):
     word_id: int
     remembered: bool
     interval_days: Optional[int] = Field(default=None, ge=0, le=365)
+    practice: bool = False   # practice round: "remembered" must not touch the schedule
 
 
 class AddToLearnRequest(BaseModel):

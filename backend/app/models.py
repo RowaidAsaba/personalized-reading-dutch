@@ -189,6 +189,7 @@ class ReadingSession(Base):
     topic_used: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
     reading_number: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
     cefr_level_used: Mapped[Optional[str]] = mapped_column(String(10), nullable=True)
+    narrative_style: Mapped[Optional[str]] = mapped_column(String(40), nullable=True)   # key in session_generator.STYLES
     blue_word_ids: Mapped[Optional[Any]] = mapped_column(JSON, nullable=True)
     yellow_word_ids: Mapped[Optional[Any]] = mapped_column(JSON, nullable=True)
     looked_up_word_ids: Mapped[Optional[Any]] = mapped_column(JSON, nullable=True)
