@@ -115,6 +115,20 @@ def review_queue(user: User = Depends(get_current_user), db: Session = Depends(g
     }
 
 
+@router.get("/practice")
+def practice_queue(user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    """Every LEARNING word, lowest mastery first, for an extra round once nothing is due.
+    Practice rounds do not change the spaced-repetition schedule (see review_word)."""
+    rows = (
+        db.query(UserVocabularyVector)
+        .join(UserVocabularyVector.lexicon_entry)
+        .filter(UserVocabularyVector.user_id == user.user_id, UserVocabularyVector.status == VocabStatus.LEARNING)
+        .order_by(UserVocabularyVector.mastery_score.asc(), UserVocabularyVector.next_review_at.asc())
+        .all()
+    )
+    return {"cards": [_card(r.lexicon_entry, r) for r in rows], "learning_total": len(rows)}
+
+
 @router.get("/discover")
 def discover(
     background_tasks: BackgroundTasks,
@@ -163,6 +177,13 @@ def review_word(req: ReviewRequest, user: User = Depends(get_current_user), db: 
     if not row:
         raise HTTPException(status_code=404, detail="Word is not in your vocabulary")
     now = utcnow()
+
+    if req.practice and req.remembered:
+        # Extra practice round: remembering must not shorten the schedule or inflate mastery.
+        return {"success": True, "status": row.status.value.lower(), "mastery_score": row.mastery_score,
+                "next_review_at": row.next_review_at.isoformat() if row.next_review_at else None,
+                "practice": True}
+
     row.last_reviewed_at = now
 
     if req.remembered:

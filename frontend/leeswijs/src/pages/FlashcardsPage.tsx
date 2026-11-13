@@ -7,6 +7,7 @@ import { useStore } from "../store";
 import {
   addToLearn,
   getDiscoverWords,
+  getPracticeQueue,
   getReviewQueue,
   markKnown,
   submitReview,
@@ -171,6 +172,8 @@ export default function FlashcardsPage() {
   );
 }
 
+type Round = "due" | "practice";
+
 function ReviewMode({
   loading, error, data, onHome, onReviewedChange, onDiscover,
 }: {
@@ -181,22 +184,31 @@ function ReviewMode({
   onReviewedChange: (n: number) => void;
   onDiscover: () => void;
 }) {
+  const [round, setRound] = useState<Round>("due");
   const [stack, setStack] = useState<FlashcardItem[]>([]);
   const [stackReady, setStackReady] = useState(false);
   const [reviewed, setReviewed] = useState(0);
+  const [practiced, setPracticed] = useState(0);
   const [flipped, setFlipped] = useState(false);
   const [saving, setSaving] = useState(false);
   const [done, setDone] = useState(false);
+  const [learningTotal, setLearningTotal] = useState(0);
+  const [practiceLoading, setPracticeLoading] = useState(false);
+  const [practiceError, setPracticeError] = useState<string | null>(null);
 
   useEffect(() => {
     if (data) {
       setStack([...data.cards]);
+      setLearningTotal(data.learning_total ?? 0);
+      setRound("due");
+      setDone(false);
       setStackReady(true);
     }
   }, [data]);
 
   useEffect(() => { onReviewedChange(reviewed); }, [reviewed, onReviewedChange]);
 
+  const isPractice = round === "practice";
   const dueCount = data?.due_count ?? 0;
   const serverReviewed = data?.reviewed_today ?? 0;
   const totalDailyTask = dueCount + serverReviewed;
@@ -208,12 +220,31 @@ function ReviewMode({
 
   const card = stack[0] ?? null;
 
+  async function startPractice() {
+    setPracticeLoading(true);
+    setPracticeError(null);
+    const res = await getPracticeQueue();
+    setPracticeLoading(false);
+    if (!res.success) {
+      setPracticeError(res.error ?? "Could not load your words.");
+      return;
+    }
+    setLearningTotal(res.data.learning_total);
+    if (res.data.cards.length === 0) return;
+    setStack([...res.data.cards]);
+    setPracticed(0);
+    setRound("practice");
+    setFlipped(false);
+    setDone(false);
+  }
+
   async function handleRemember() {
     if (!card) return;
     setSaving(true);
-    await submitReview(card.wordId, true).catch(() => undefined);
+    await submitReview(card.wordId, true, undefined, isPractice).catch(() => undefined);
     setSaving(false);
-    setReviewed((n) => n + 1);
+    if (isPractice) setPracticed((n) => n + 1);
+    else setReviewed((n) => n + 1);
     setStack((prev) => prev.slice(1));
     setFlipped(false);
     if (stack.length <= 1) setDone(true);
@@ -222,7 +253,8 @@ function ReviewMode({
   function handleForgot() {
     if (!card) return;
     setFlipped(true);
-    void submitReview(card.wordId, false).catch(() => undefined);
+    // Forgetting counts in a practice round too: mastery drops and the card becomes due again.
+    void submitReview(card.wordId, false, undefined, isPractice).catch(() => undefined);
   }
 
   function continueAfterForgot() {
@@ -247,15 +279,16 @@ function ReviewMode({
     </div>
   );
 
-  if (stackReady && stack.length === 0 && !done) return (
-    <EmptyReview onHome={onHome} onDiscover={onDiscover} learningTotal={data?.learning_total ?? 0} />
-  );
-
   if (done || (stackReady && stack.length === 0)) return (
-    <DeckDone
+    <ReviewDone
+      round={round}
       reviewed={reviewed}
-      total={dueCount}
-      onRestart={() => { setStack(data?.cards ? [...data.cards] : []); setDone(false); setReviewed(0); onReviewedChange(0); }}
+      practiced={practiced}
+      learningTotal={learningTotal}
+      loading={practiceLoading}
+      error={practiceError}
+      onPractice={() => void startPractice()}
+      onDiscover={onDiscover}
       onHome={onHome}
     />
   );
@@ -265,23 +298,32 @@ function ReviewMode({
   return (
     <div className="max-w-md mx-auto">
       <div className="mb-4">
-        <div className="flex justify-between text-xs font-body text-text/50 mb-1.5">
-          <span>{reviewed} reviewed today</span>
-          <span>{dueCount === 0 ? "No words due" : `${Math.max(0, dueCount - reviewed)} remaining`}</span>
-        </div>
-        <div className="h-2.5 rounded-full bg-black/8 overflow-hidden">
-          <motion.div
-            className="h-full rounded-full"
-            style={{ backgroundColor: barColor }}
-            animate={{ width: dueCount === 0 ? "100%" : `${barPct}%` }}
-            transition={{ duration: 0.4, ease: "easeOut" }}
-          />
-        </div>
+        {isPractice ? (
+          <div className="flex justify-between text-xs font-body text-text/50 mb-1.5">
+            <span className="flex items-center gap-1.5 text-violet-600 font-semibold"><RotateCcw size={12} /> Practice round</span>
+            <span>{stack.length} left · schedule unchanged</span>
+          </div>
+        ) : (
+          <>
+            <div className="flex justify-between text-xs font-body text-text/50 mb-1.5">
+              <span>{reviewed} reviewed today</span>
+              <span>{dueCount === 0 ? "No words due" : `${Math.max(0, dueCount - reviewed)} remaining`}</span>
+            </div>
+            <div className="h-2.5 rounded-full bg-black/8 overflow-hidden">
+              <motion.div
+                className="h-full rounded-full"
+                style={{ backgroundColor: barColor }}
+                animate={{ width: dueCount === 0 ? "100%" : `${barPct}%` }}
+                transition={{ duration: 0.4, ease: "easeOut" }}
+              />
+            </div>
+          </>
+        )}
       </div>
 
       <AnimatePresence mode="wait">
         <motion.div
-          key={card?.wordId}
+          key={`${round}-${card?.wordId}`}
           initial={{ opacity: 0, y: 18, scale: 0.97 }}
           animate={{ opacity: 1, y: 0, scale: 1 }}
           exit={{ opacity: 0, y: -18, scale: 0.97 }}
@@ -518,53 +560,57 @@ function DiscoverMode({
   );
 }
 
-function EmptyReview({ onHome, onDiscover, learningTotal }: { onHome: () => void; onDiscover: () => void; learningTotal: number }) {
-  return (
-    <div className="max-w-md mx-auto bg-white rounded-2xl shadow-xl shadow-black/8 px-8 py-14 text-center">
-      <div className="mb-4 flex h-14 w-14 items-center justify-center rounded-2xl bg-emerald-50 mx-auto">
-        <Check size={28} className="text-emerald-500" strokeWidth={1.8} />
-      </div>
-      <h2 className="font-heading text-xl font-bold text-text mb-2">No words due right now</h2>
-      <p className="text-sm font-body text-text/50 mb-8">
-        {learningTotal > 0
-          ? `You have ${learningTotal} word${learningTotal === 1 ? "" : "s"} in your queue; they will come back when they are due.`
-          : "Add words from readings or Discover mode and they will show up here."}
-      </p>
-      <div className="flex gap-3 justify-center">
-        <button type="button" onClick={onDiscover}
-          className="inline-flex items-center gap-2 rounded-xl bg-violet-600 text-white px-5 py-2.5 text-sm font-heading font-semibold hover:opacity-90">
-          <Sparkles size={14} /> Discover words
-        </button>
-        <button type="button" onClick={onHome}
-          className="rounded-xl border border-black/12 px-5 py-2.5 text-sm font-heading font-semibold text-text hover:bg-black/[0.03]">
-          Back home
-        </button>
-      </div>
-    </div>
-  );
-}
+function ReviewDone({
+  round, reviewed, practiced, learningTotal, loading, error, onPractice, onDiscover, onHome,
+}: {
+  round: Round;
+  reviewed: number;
+  practiced: number;
+  learningTotal: number;
+  loading: boolean;
+  error: string | null;
+  onPractice: () => void;
+  onDiscover: () => void;
+  onHome: () => void;
+}) {
+  const hasWords = learningTotal > 0;
+  const title = !hasWords
+    ? "Nothing to review yet"
+    : round === "practice"
+      ? "Practice round complete 🎉"
+      : "You've reviewed all your words for today 🎉";
+  const body = !hasWords
+    ? "Add words from Discover or from a text and they will show up here for review."
+    : round === "practice"
+      ? `You went through ${practiced} word${practiced === 1 ? "" : "s"} again. Your review schedule is unchanged.`
+      : reviewed > 0
+        ? `${reviewed} word${reviewed === 1 ? "" : "s"} reviewed. Your next cards come back when they are due. Want an extra round with all ${learningTotal} of your learning words?`
+        : `Your ${learningTotal} learning word${learningTotal === 1 ? "" : "s"} come back when they are due. Want an extra round in the meantime?`;
 
-function DeckDone({
-  reviewed, total, onRestart, onHome,
-}: { reviewed: number; total: number; onRestart: () => void; onHome: () => void }) {
-  const pct = total === 0 ? 100 : Math.round((reviewed / total) * 100);
   return (
     <div className="max-w-md mx-auto bg-white rounded-2xl shadow-xl shadow-black/8 px-8 py-14 text-center">
-      <div className="mb-4 flex h-14 w-14 items-center justify-center rounded-2xl bg-emerald-50 mx-auto">
-        <Check size={28} className="text-emerald-500" strokeWidth={1.8} />
+      <div className={`mb-4 flex h-14 w-14 items-center justify-center rounded-2xl mx-auto ${hasWords ? "bg-emerald-50" : "bg-violet-50"}`}>
+        {hasWords
+          ? <Check size={28} className="text-emerald-500" strokeWidth={1.8} />
+          : <Sparkles size={26} className="text-violet-400" strokeWidth={1.6} />}
       </div>
-      <h2 className="font-heading text-xl font-bold text-text mb-1">Session complete!</h2>
-      <p className="text-2xl font-heading font-black text-emerald-600 mb-1">{pct}%</p>
-      <p className="text-sm font-body text-text/50 mb-8">
-        {reviewed} of {total} due cards reviewed.
-      </p>
-      <div className="flex gap-3">
-        <button type="button" onClick={onRestart}
-          className="flex-1 flex items-center justify-center gap-2 rounded-xl border border-black/12 px-5 py-2.5 text-sm font-heading font-semibold text-text hover:bg-black/[0.03]">
-          <RotateCcw size={13} /> Study again
-        </button>
+      <h2 className="font-heading text-xl font-bold text-text mb-2">{title}</h2>
+      <p className="text-sm font-body text-text/50 mb-8 leading-relaxed">{body}</p>
+      {error && <p className="mb-4 text-xs font-body text-red-600">{error}</p>}
+      <div className="flex gap-3 justify-center flex-wrap">
+        {hasWords ? (
+          <button type="button" onClick={onPractice} disabled={loading}
+            className="inline-flex items-center gap-2 rounded-xl bg-primary text-white px-5 py-2.5 text-sm font-heading font-semibold hover:opacity-90 disabled:opacity-50">
+            <RotateCcw size={14} /> {loading ? "Loading…" : "Review again"}
+          </button>
+        ) : (
+          <button type="button" onClick={onDiscover}
+            className="inline-flex items-center gap-2 rounded-xl bg-violet-600 text-white px-5 py-2.5 text-sm font-heading font-semibold hover:opacity-90">
+            <Sparkles size={14} /> Discover words
+          </button>
+        )}
         <button type="button" onClick={onHome}
-          className="flex-1 flex items-center justify-center gap-2 rounded-xl bg-primary text-white px-5 py-2.5 text-sm font-heading font-semibold hover:opacity-90">
+          className="inline-flex items-center gap-2 rounded-xl border border-black/12 px-5 py-2.5 text-sm font-heading font-semibold text-text hover:bg-black/[0.03]">
           <Home size={13} /> Home
         </button>
       </div>

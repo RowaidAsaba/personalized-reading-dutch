@@ -327,11 +327,22 @@ export async function getDiscoverWords(limit = 20): Promise<ApiResponse<{ words:
   }
 }
 
-export async function submitReview(wordId: string, remembered: boolean, intervalDays?: number): Promise<void> {
+export async function getPracticeQueue(): Promise<ApiResponse<{ cards: FlashcardItem[]; learning_total: number }>> {
+  try {
+    const { data } = await apiClient.get<{ cards: FlashcardItem[]; learning_total: number }>("/vocab/practice");
+    return { success: true, data: { ...data, cards: (data.cards ?? []).map(normalizeCard) } };
+  } catch (err) {
+    return { success: false, error: extractError(err) };
+  }
+}
+
+/** `practice: true` marks an extra round: "remembered" then leaves the schedule and mastery untouched. */
+export async function submitReview(wordId: string, remembered: boolean, intervalDays?: number, practice = false): Promise<void> {
   await apiClient.post("/vocab/review", {
     word_id: parseInt(wordId, 10),
     remembered,
     interval_days: intervalDays ?? null,
+    practice,
   });
 }
 

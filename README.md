@@ -8,15 +8,16 @@ LeesWijs is a personalised Dutch reading app for second-language learners. Every
 - **Onboarding**: a short profile (age, city, job, background, languages, purpose, optional gender), interests, and a two-batch word check that estimates the CEFR level and marks known words.
 - **Reading**: generate a text, continue the story as often as you like, then end it. Ending shows a quick pop-up (difficulty on a five-point scale, plus stars for interesting, relevant and worth your time) that can be skipped. Ended readings stay in the searchable history.
 - **Words in texts**: new target words (blue) and words from your review deck (yellow) are woven into every text. Tap any word for its translation, open its details, add it to your deck or mark it known.
-- **Flashcards**: *Review* shows words that are due with spaced repetition. *Discover* always offers new words chosen for your profile and interests.
+- **Flashcards**: *Review* shows words that are due with spaced repetition; once nothing is due, *Review again* starts a practice round with all your learning words without touching the schedule. *Discover* always offers new words chosen for your profile and interests.
 - **Dashboard, profile and settings**: level, words known, reading time; edit the whole profile, interests and the text-difficulty setting at any time.
 
 ## How personalisation works
 
+- **Text styles**: every text gets one of six rotating styles (short story, mystery explainer, true profile, scene, day in the life, interview). The style of the last two texts is never repeated, and the style of a text you rated "not interesting" is skipped next time. Continuations keep the style of their text.
 - **Text generation** (Gemini) uses: your effective level (assessed CEFR plus a difficulty offset), a topic rolled from your interests with learned topic scores, two sampled profile traits for the angle, your gender only to make people in the text relatable (never topics, difficulty or words), one to three new words from your recommendation reservoir, two to four learning words with the lowest mastery, and the adaptation built from your last feedbacks.
 - **Feedback** (End reading): the average difficulty of the last three ratings sets harder, same or simpler; low interest or relevance in the last two ratings forces the next topic to come from your interests; low worth-your-time makes the next text shorter and more practical. Three ratings on the same side of "Normal" move the difficulty offset one step. Each rating also raises or lowers the score of the topic that was used.
 - **Recommendations** (KRS): a reservoir of about 50 unseen words per user, requested from Gemini with your profile, interests, level and mother tongue, matched against the lexicon and topped up from the lexicon at your level when needed. It refills automatically when it runs low or when your profile changes.
-- **Vocabulary vector**: every word you meet gets a row with a status (encountered, learning, mastered), a mastery score, exposure count, look-up count and review schedule. Reviews, add-to-learn, mark-known and look-ups while reading all update it; repeated look-ups of a "known" word move it back into the review deck.
+- **Vocabulary vector**: every word you meet gets a row with a status (encountered, learning, mastered), a mastery score, exposure count, look-up count and review schedule. Reviews, add-to-learn, mark-known and look-ups while reading all update it; repeated look-ups of a "known" word move it back into the review deck. In a practice round "I remember" changes nothing, while "I forgot" still lowers mastery and makes the card due again.
 
 ## Tech stack
 
