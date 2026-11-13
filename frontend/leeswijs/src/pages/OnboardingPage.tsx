@@ -440,7 +440,7 @@ function PersonalStep(props: {
           </select>
         </Field>
         <Field label="Gender (optional)">
-          <GenderChips value={props.gender} onChange={props.setGender} />
+          <GenderSelect value={props.gender} onChange={props.setGender} />
         </Field>
       </div>
 
@@ -452,30 +452,12 @@ function PersonalStep(props: {
   );
 }
 
-export function GenderChips({ value, onChange }: { value: Gender | ""; onChange: (v: Gender | "") => void }) {
+export function GenderSelect({ value, onChange }: { value: Gender | ""; onChange: (v: Gender | "") => void }) {
   return (
-    <div className="flex flex-wrap gap-2" role="radiogroup" aria-label="Gender">
-      {GENDERS.map((g) => {
-        const active = value === g.value;
-        return (
-          <button
-            key={g.value}
-            type="button"
-            role="radio"
-            aria-checked={active}
-            onClick={() => onChange(active ? "" : g.value)}
-            className={[
-              "rounded-full border px-3 py-1.5 text-xs font-body font-semibold transition-colors",
-              active
-                ? "border-primary bg-primary/[0.08] text-primary"
-                : "border-black/12 bg-white text-text/65 hover:border-black/25",
-            ].join(" ")}
-          >
-            {g.label}
-          </button>
-        );
-      })}
-    </div>
+    <select value={value} onChange={(e) => onChange(e.target.value as Gender | "")} className={inputCls} aria-label="Gender">
+      <option value="">Select…</option>
+      {GENDERS.map((g) => <option key={g.value} value={g.value}>{g.label}</option>)}
+    </select>
   );
 }
 

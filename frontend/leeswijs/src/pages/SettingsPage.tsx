@@ -18,7 +18,7 @@ import ErrorBanner from "../components/ErrorBanner";
 import { useStore } from "../store";
 import { INTERESTS, MIN_INTERESTS, MAX_INTERESTS, type InterestId } from "../constants/interests";
 import { PURPOSES, type Gender, type Purpose } from "../types";
-import { GenderChips, inputCls } from "./OnboardingPage";
+import { GenderSelect, inputCls } from "./OnboardingPage";
 
 interface ProfileForm {
   display_name: string;
@@ -208,11 +208,9 @@ export default function SettingsPage() {
               {PURPOSES.map((p) => <option key={p} value={p}>{p.charAt(0).toUpperCase() + p.slice(1)}</option>)}
             </select>
           </Labeled>
-          <div className="sm:col-span-2">
-            <Labeled label="Gender (optional)" hint="Only used so people in your texts feel relatable. Never changes topics or difficulty.">
-              <GenderChips value={form.gender} onChange={(v) => update("gender", v)} />
-            </Labeled>
-          </div>
+          <Labeled label="Gender (optional)" hint="Only used so people in your texts feel relatable. Never changes topics or difficulty.">
+            <GenderSelect value={form.gender} onChange={(v) => update("gender", v)} />
+          </Labeled>
         </div>
       </Section>
 
