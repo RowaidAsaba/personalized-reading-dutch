@@ -20,7 +20,10 @@ FRONTEND_ORIGINS: list[str] = [
 
 # Gemini (text generation, word recommendations, dictionary fallback).
 GOOGLE_API_KEY: str = os.getenv("GOOGLE_API_KEY", "")
-GEMINI_MODEL: str = os.getenv("GEMINI_MODEL", "gemini-2.5-flash-lite")
+GEMINI_MODEL: str = os.getenv("GEMINI_MODEL", "gemini-3-flash-preview")
+# Used once per call when GEMINI_MODEL fails with a model, timeout or rate-limit error. Empty disables it.
+GEMINI_FALLBACK_MODEL: str = os.getenv("GEMINI_FALLBACK_MODEL", "gemini-2.5-flash-lite")
+GEMINI_TIMEOUT_SECONDS: float = float(os.getenv("GEMINI_TIMEOUT_SECONDS", "90"))
 
 # Authentication.
 AUTH_SECRET_KEY: str = os.getenv("AUTH_SECRET_KEY", "")

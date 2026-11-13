@@ -69,7 +69,9 @@ Backend (`backend/.env`):
 | `DATABASE_URL` | yes | `sqlite:///./dev.db` locally; `postgresql+psycopg://USER:PASSWORD@HOST/DB?sslmode=require` for Neon |
 | `FRONTEND_ORIGINS` | yes | Comma-separated origins allowed by CORS |
 | `GOOGLE_API_KEY` | for generation | Gemini API key. Without it the app runs, but texts, recommendations and dictionary look-ups fail with a clear error |
-| `GEMINI_MODEL` | no | Defaults to `gemini-2.5-flash-lite` |
+| `GEMINI_MODEL` | no | Model for every Gemini call, with the model's default thinking. Defaults to `gemini-3-flash-preview` |
+| `GEMINI_FALLBACK_MODEL` | no | Tried once per call when the main model fails with a model, timeout or rate-limit error. Defaults to `gemini-2.5-flash-lite`; empty disables the fallback |
+| `GEMINI_TIMEOUT_SECONDS` | no | Per-call timeout before falling back, default 90 |
 | `AUTH_SECRET_KEY` | yes in production | Secret used to sign login tokens. Generate with `python -c "import secrets; print(secrets.token_urlsafe(48))"` |
 | `ACCESS_TOKEN_EXPIRE_MINUTES` | no | Login validity, default 14 days |
 | `GOOGLE_CLIENT_ID` | for Google login | OAuth 2.0 Web client ID; empty hides the Google button |
@@ -135,5 +137,6 @@ There are no migrations: the schema is created from `app/models.py`. For an exis
 - **Backend cannot find packages**: activate the virtual environment again and rerun `pip install -r requirements.txt`.
 - **Frontend cannot reach the backend**: check the backend is running at `http://127.0.0.1:8000/` and that `VITE_API_BASE_URL` in `.env.local` points to it. Restart the dev server after changing `.env.local`.
 - **"Text generation is not configured"**: add `GOOGLE_API_KEY` to `backend/.env` and restart the backend.
+- **Texts are slow or a model error appears in the log**: the backend log prints one `[gemini] model=… 7.2s` line per call and a warning when it falls back to `GEMINI_FALLBACK_MODEL`. Point `GEMINI_MODEL` at a model your key can use.
 - **Google button missing**: set `VITE_GOOGLE_CLIENT_ID` (frontend) and `GOOGLE_CLIENT_ID` (backend) and restart both.
 - **Logged out unexpectedly**: tokens expire after `ACCESS_TOKEN_EXPIRE_MINUTES`, and changing `AUTH_SECRET_KEY` invalidates all existing logins.
